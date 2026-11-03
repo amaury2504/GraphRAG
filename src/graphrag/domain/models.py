@@ -13,6 +13,15 @@ class Article:
 
 
 @dataclass(frozen=True, slots=True)
+class Chunk:
+    """A piece of an article's abstract, the unit that gets embedded and searched."""
+
+    arxiv_id: str
+    position: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class Author:
     key: str
     name: str
