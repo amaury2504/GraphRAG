@@ -4,17 +4,25 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from itertools import islice
+from pathlib import Path
 
 import httpx
 
 from graphrag.adapters.arxiv import ArxivSource
+from graphrag.adapters.citation_ledger import DEFAULT_PATH, FileCitationLedger
 from graphrag.adapters.http import RequestFailedError
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.openalex import BATCH_SIZE, OpenAlexSource
 from graphrag.adapters.semantic_scholar import BATCH_SIZE as SEMANTIC_SCHOLAR_BATCH
 from graphrag.adapters.semantic_scholar import SemanticScholarSource
 from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
-from graphrag.ports.ingestion import AuthorSource, CitationSource, GraphStore, PaperSource
+from graphrag.ports.ingestion import (
+    AuthorSource,
+    CitationLedger,
+    CitationSource,
+    GraphStore,
+    PaperSource,
+)
 from graphrag.settings import Settings
 
 ARTICLE_BATCH = 100
@@ -55,6 +63,7 @@ def run_ingestion(
     end: date,
     *,
     limit: int | None = None,
+    ledger: CitationLedger | None = None,
     log: Callable[[str], None] = log_line,
 ) -> IngestionReport:
     store.ensure_schema()
@@ -85,7 +94,7 @@ def run_ingestion(
         works.extend(found)
         log(f"authors (openalex): {min(offset + BATCH_SIZE, len(ids))}/{len(ids)} looked up")
 
-    cites = run_citations(citations, store, ids, log=log)
+    cites = run_citations(citations, store, ids, ledger=ledger, log=log)
 
     return IngestionReport(
         articles_fetched=fetched,
@@ -102,17 +111,23 @@ def run_ingestion(
 def run_citations(
     citations: CitationSource,
     store: GraphStore,
-    ids: Sequence[str],
+    all_ids: Sequence[str],
     *,
+    ledger: CitationLedger | None = None,
     log: Callable[[str], None] = log_line,
 ) -> CitationReport:
-    """Look up references of `ids` and write them batch by batch.
+    """Look up references of the ids not yet in `ledger`, and write them batch by batch.
 
     Every article is stored before this runs, so citation targets exist. Writing per batch
-    keeps progress visible in the database and survives an interruption. A batch whose
-    retries are exhausted is skipped and counted, so one saturated window does not stop the
-    run; any other error still stops it.
+    keeps progress visible in the database and survives an interruption. A batch is marked
+    in the ledger only after its citations are written, so a crash in between just means a
+    second lookup. A batch whose retries are exhausted is skipped and counted, so one
+    saturated window does not stop the run; any other error still stops it.
     """
+    already = ledger.checked() if ledger is not None else set()
+    ids = [i for i in all_ids if i not in already]
+    skipped = len(all_ids) - len(ids)
+    log(f"references (semantic scholar): {skipped} already checked, {len(ids)} to look up")
     references: list[ReferenceRecord] = []
     failed_batches = 0
     failed_ids = 0
@@ -127,6 +142,8 @@ def run_citations(
             log(f"references (semantic scholar): {done}/{len(ids)} batch skipped ({exc})")
             continue
         store.upsert_citations(found_refs)
+        if ledger is not None:
+            ledger.mark(batch)
         references.extend(found_refs)
         log(
             f"references (semantic scholar): {done}/{len(ids)} looked up, "
@@ -151,7 +168,33 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="skip arXiv and OpenAlex; look up citations of the articles already stored",
     )
+    parser.add_argument(
+        "--recheck-citations",
+        action="store_true",
+        help=f"look up every article again, ignoring {DEFAULT_PATH} (e.g. after emptying Neo4j)",
+    )
     return parser.parse_args(argv)
+
+
+class RecheckLedger:
+    """Forgets past lookups for this run but keeps recording new ones."""
+
+    def __init__(self, inner: CitationLedger) -> None:
+        self._inner = inner
+
+    def checked(self) -> set[str]:
+        return set()
+
+    def mark(self, arxiv_ids: Sequence[str]) -> None:
+        self._inner.mark(arxiv_ids)
+
+
+def make_ledger(recheck: bool, inner: CitationLedger) -> CitationLedger:
+    return RecheckLedger(inner) if recheck else inner
+
+
+def ledger_from_args(args: argparse.Namespace, path: Path = DEFAULT_PATH) -> CitationLedger:
+    return make_ledger(args.recheck_citations, FileCitationLedger(path))
 
 
 def exit_code(failed_batches: int) -> int:
@@ -170,9 +213,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings.neo4j_password.get_secret_value(),
         ) as store,
     ):
+        ledger = ledger_from_args(args)
         if args.citations_only:
             store.ensure_schema()
-            cites = run_citations(SemanticScholarSource(client), store, store.article_ids())
+            cites = run_citations(
+                SemanticScholarSource(client), store, store.article_ids(), ledger=ledger
+            )
             print(cites, store.counts())
             return exit_code(cites.failed_batches)
         report = run_ingestion(
@@ -183,6 +229,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.since,
             args.until,
             limit=args.limit,
+            ledger=ledger,
         )
     print(report)
     return exit_code(report.citation_batches_failed)

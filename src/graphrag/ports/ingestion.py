@@ -41,3 +41,15 @@ class GraphStore(Protocol):
     def article_ids(self) -> list[str]: ...
 
     def counts(self) -> GraphCounts: ...
+
+
+class CitationLedger(Protocol):
+    """Remembers which articles already had their references looked up, across runs."""
+
+    def checked(self) -> set[str]:
+        """Ids whose lookup completed and whose citations were written."""
+        ...
+
+    def mark(self, arxiv_ids: Sequence[str]) -> None:
+        """Record ids as done; call only after their citations are stored."""
+        ...

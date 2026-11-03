@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Sequence
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,8 @@ from graphrag.cli.ingest import (
     IngestionReport,
     _parse_args,
     exit_code,
+    ledger_from_args,
+    make_ledger,
     run_citations,
     run_ingestion,
 )
@@ -247,6 +250,7 @@ def test_progress_is_logged_for_each_citation_batch() -> None:
     )
     refs = [m for m in messages if m.startswith("references")]
     assert refs == [
+        "references (semantic scholar): 0 already checked, 150 to look up",
         "references (semantic scholar): 100/150 looked up, 100 articles known so far",
         "references (semantic scholar): 150/150 looked up, 150 articles known so far",
     ]
@@ -300,7 +304,7 @@ def test_skipped_batch_is_logged() -> None:
     store.upsert_articles([article(n) for n in range(1, 4)])
     messages: list[str] = []
     run_citations(FailingBatches({1}), store, store.article_ids(), log=messages.append)
-    assert messages == ["references (semantic scholar): 3/3 batch skipped (HTTP 429)"]
+    assert messages[1:] == ["references (semantic scholar): 3/3 batch skipped (HTTP 429)"]
 
 
 def test_full_run_reports_failed_citation_batches() -> None:
@@ -331,3 +335,147 @@ def test_exit_code_tells_whether_a_rerun_is_needed(failed: int, code: int) -> No
 def test_citations_only_flag() -> None:
     assert _parse_args(["--citations-only"]).citations_only is True
     assert _parse_args([]).citations_only is False
+
+
+class FakeLedger:
+    def __init__(self, checked: set[str] | None = None) -> None:
+        self.done: set[str] = set(checked or ())
+        self.marks: list[list[str]] = []
+
+    def checked(self) -> set[str]:
+        return set(self.done)
+
+    def mark(self, arxiv_ids: Sequence[str]) -> None:
+        self.marks.append(list(arxiv_ids))
+        self.done.update(arxiv_ids)
+
+
+def stored(count: int) -> FakeStore:
+    store = FakeStore()
+    store.upsert_articles([article(n) for n in range(1, count + 1)])
+    return store
+
+
+def test_already_checked_ids_are_not_looked_up_again() -> None:
+    store = stored(250)
+    ledger = FakeLedger({arxiv_id(n) for n in range(1, 201)})
+    source = FakeCitations(dict.fromkeys(range(1, 251), ()))
+    run_citations(source, store, store.article_ids(), ledger=ledger, log=lambda _m: None)
+    assert source.calls == [50]
+
+
+def test_every_id_of_a_written_batch_is_marked_even_unknown_ones() -> None:
+    store = stored(3)
+    ledger = FakeLedger()
+    source = FakeCitations({1: ()})  # 2 and 3 unknown to the source
+    run_citations(source, store, store.article_ids(), ledger=ledger, log=lambda _m: None)
+    assert ledger.done == {arxiv_id(1), arxiv_id(2), arxiv_id(3)}
+
+
+def test_skipped_batch_is_not_marked() -> None:
+    store = stored(250)
+    ledger = FakeLedger()
+    run_citations(
+        FailingBatches({2}), store, store.article_ids(), ledger=ledger, log=lambda _m: None
+    )
+    assert ledger.done == {arxiv_id(n) for n in [*range(1, 101), *range(201, 251)]}
+
+
+def test_rerun_after_a_skipped_batch_only_redoes_that_batch() -> None:
+    store = stored(250)
+    ledger = FakeLedger()
+    run_citations(
+        FailingBatches({2}), store, store.article_ids(), ledger=ledger, log=lambda _m: None
+    )
+    source = FakeCitations(dict.fromkeys(range(1, 251), ()))
+    report = run_citations(source, store, store.article_ids(), ledger=ledger, log=lambda _m: None)
+    assert source.calls == [100]
+    assert report.failed_batches == 0
+
+
+def test_mark_happens_after_the_write() -> None:
+    order: list[str] = []
+
+    class Store(FakeStore):
+        def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
+            order.append("write")
+
+    class Ledger(FakeLedger):
+        def mark(self, arxiv_ids: Sequence[str]) -> None:
+            order.append("mark")
+
+    store = Store()
+    store.upsert_articles([article(1)])
+    run_citations(
+        FakeCitations({1: ()}), store, store.article_ids(), ledger=Ledger(), log=lambda _m: None
+    )
+    assert order == ["write", "mark"]
+
+
+def test_crash_while_writing_leaves_the_batch_unmarked() -> None:
+    class Store(FakeStore):
+        def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
+            raise RuntimeError("neo4j down")
+
+    store = Store()
+    store.upsert_articles([article(1)])
+    ledger = FakeLedger()
+    with pytest.raises(RuntimeError, match="neo4j down"):
+        run_citations(
+            FakeCitations({1: ()}), store, store.article_ids(), ledger=ledger, log=lambda _m: None
+        )
+    assert ledger.done == set()
+
+
+def test_start_message_says_what_is_left() -> None:
+    store = stored(3)
+    messages: list[str] = []
+    run_citations(
+        FakeCitations({}),
+        store,
+        store.article_ids(),
+        ledger=FakeLedger({arxiv_id(1)}),
+        log=messages.append,
+    )
+    assert messages[0] == "references (semantic scholar): 1 already checked, 2 to look up"
+
+
+def test_full_ingestion_passes_the_ledger_through() -> None:
+    store = FakeStore()
+    ledger = FakeLedger({arxiv_id(1)})
+    citations = FakeCitations({})
+    run_ingestion(
+        FakePapers(3),
+        FakeAuthors(set()),
+        citations,
+        store,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        ledger=ledger,
+        log=lambda _m: None,
+    )
+    assert citations.calls == [2]
+
+
+def test_recheck_ledger_forgets_but_still_records() -> None:
+    inner = FakeLedger({arxiv_id(1)})
+    ledger = make_ledger(True, inner)
+    assert ledger.checked() == set()
+    ledger.mark([arxiv_id(2)])
+    assert inner.done == {arxiv_id(1), arxiv_id(2)}
+    assert make_ledger(False, inner) is inner
+
+
+def test_recheck_flag() -> None:
+    assert _parse_args(["--recheck-citations"]).recheck_citations is True
+    assert _parse_args([]).recheck_citations is False
+
+
+@pytest.mark.parametrize(("argv", "remembers"), [([], True), (["--recheck-citations"], False)])
+def test_ledger_from_args_honours_recheck(tmp_path: Path, argv: list[str], remembers: bool) -> None:
+    path = tmp_path / "checked.txt"
+    path.write_text(arxiv_id(1) + "\n", encoding="utf-8")
+    ledger = ledger_from_args(_parse_args(argv), path)
+    assert ledger.checked() == ({arxiv_id(1)} if remembers else set())
+    ledger.mark([arxiv_id(2)])
+    assert arxiv_id(2) in path.read_text(encoding="utf-8")
