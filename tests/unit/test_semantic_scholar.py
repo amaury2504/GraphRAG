@@ -109,7 +109,7 @@ def test_shared_pool_429s_are_retried_patiently() -> None:
     env = Env([httpx.Response(429)] * 3 + [httpx.Response(200, json=sample_payload())])
     assert len(env.source().fetch_references(IDS)) == 2
     assert len(env.requests) == 4
-    assert env.sleeps[:3] == [20.0, 40.0, 80.0]
+    assert env.sleeps[:3] == [20.0, 40.0, 60.0]  # capped at 60 s
 
 
 def test_empty_input_makes_no_request() -> None:

@@ -139,3 +139,18 @@ def test_post_sends_json_body_and_retries() -> None:
     )
     assert response.text == "ok"
     assert bodies == [b'{"ids":["a"]}', b'{"ids":["a"]}']
+
+
+def test_backoff_is_capped_by_max_delay() -> None:
+    client, _ = client_with(*[httpx.Response(503)] * 5, httpx.Response(200, text="ok"))
+    clock = FakeClock()
+    get_with_retry(
+        client,
+        "https://x.test/a",
+        {},
+        sleep=clock.sleep,
+        base_delay=20.0,
+        max_delay=60.0,
+        max_attempts=6,
+    )
+    assert clock.sleeps == [20.0, 40.0, 60.0, 60.0, 60.0]

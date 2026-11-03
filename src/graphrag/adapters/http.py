@@ -49,6 +49,7 @@ def send_with_retry(
     limiter: MinIntervalLimiter | None = None,
     max_attempts: int = 5,
     base_delay: float = 2.0,
+    max_delay: float = 600.0,
     sleep: Callable[[float], None] = time.sleep,
     is_error_body: Callable[[httpx.Response], bool] = lambda _r: False,
 ) -> httpx.Response:
@@ -57,7 +58,7 @@ def send_with_retry(
     for attempt in range(max_attempts):
         if limiter is not None:
             limiter.wait()
-        delay = base_delay * 2**attempt
+        delay = min(base_delay * 2**attempt, max_delay)
         try:
             response = client.request(method, url, params=params, json=json)
         except httpx.TransportError as exc:

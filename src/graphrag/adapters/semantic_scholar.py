@@ -25,13 +25,15 @@ class SemanticScholarSource:
         *,
         min_interval: float = 1.0,
         retry_delay: float = 20.0,
-        max_attempts: int = 8,
+        max_delay: float = 60.0,
+        max_attempts: int = 10,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._client = client
         self._limiter = MinIntervalLimiter(min_interval, clock, sleep)
         self._retry_delay = retry_delay
+        self._max_delay = max_delay
         self._max_attempts = max_attempts
         self._sleep = sleep
 
@@ -49,6 +51,7 @@ class SemanticScholarSource:
             limiter=self._limiter,
             max_attempts=self._max_attempts,
             base_delay=self._retry_delay,
+            max_delay=self._max_delay,
             sleep=self._sleep,
         )
         return parse_batch(arxiv_ids, response.json())
