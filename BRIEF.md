@@ -24,6 +24,7 @@
 
 - **Version de Neo4j** : 5.26.32 LTS est en place **à titre provisoire**. Alternative : 2026.10. Vérifier dans la doc officielle le support des index vectoriels et texte intégral avant l'étape 3.
 - **Modèle d'embeddings** (et de reranking), **fournisseur de LLM**, **budget d'appels**.
+- **Fusion de la recherche hybride** : décidé le 2026-11-03, option A (Reciprocal Rank Fusion, `1/(60 + rang)`, fusion en Python dans `pipeline/`). **Option B à essayer après l'étape 4** : somme pondérée de scores normalisés (min-max, poids à régler sur le jeu de test), si le jeu de test montre un écart.
 - Normalisation des noms de méthodes/benchmarks (avant l'étape 6), taille du lot d'extraction, nombre de testeurs, seuils de latence et de coût.
 - Licence du dépôt (aucun fichier `LICENSE` pour l'instant).
 
