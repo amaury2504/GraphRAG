@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
+from graphrag.adapters.http import RequestFailedError
 from graphrag.adapters.semantic_scholar import BATCH_SIZE, SemanticScholarSource, parse_batch
 from graphrag.domain.models import ReferenceRecord
 
@@ -109,7 +110,19 @@ def test_shared_pool_429s_are_retried_patiently() -> None:
     env = Env([httpx.Response(429)] * 3 + [httpx.Response(200, json=sample_payload())])
     assert len(env.source().fetch_references(IDS)) == 2
     assert len(env.requests) == 4
-    assert env.sleeps[:3] == [20.0, 40.0, 60.0]  # capped at 60 s
+    assert env.sleeps[:3] == [10.0, 20.0, 20.0]  # capped at 20 s
+
+
+def test_a_batch_gets_thirty_attempts_before_being_given_up() -> None:
+    env = Env([httpx.Response(429)] * 29 + [httpx.Response(200, json=sample_payload())])
+    assert len(env.source().fetch_references(IDS)) == 2
+    assert len(env.requests) == 30
+
+
+def test_thirty_429s_give_up_the_batch() -> None:
+    env = Env([httpx.Response(429)] * 30)
+    with pytest.raises(RequestFailedError, match="30 attempts"):
+        env.source().fetch_references(IDS)
 
 
 def test_empty_input_makes_no_request() -> None:
