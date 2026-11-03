@@ -1,5 +1,6 @@
 import time
 from collections.abc import Callable, Mapping
+from typing import Any
 
 import httpx
 
@@ -33,24 +34,32 @@ class MinIntervalLimiter:
 
 
 def get_with_retry(
+    client: httpx.Client, url: str, params: Mapping[str, str | int], **kwargs: Any
+) -> httpx.Response:
+    return send_with_retry(client, "GET", url, params, **kwargs)
+
+
+def send_with_retry(
     client: httpx.Client,
+    method: str,
     url: str,
     params: Mapping[str, str | int],
     *,
+    json: object = None,
     limiter: MinIntervalLimiter | None = None,
     max_attempts: int = 5,
     base_delay: float = 2.0,
     sleep: Callable[[float], None] = time.sleep,
     is_error_body: Callable[[httpx.Response], bool] = lambda _r: False,
 ) -> httpx.Response:
-    """GET with exponential backoff on network errors, 429/5xx and soft errors in a 200 body."""
+    """Request with exponential backoff on network errors, 429/5xx and soft errors in a 200."""
     last_problem = "no attempt made"
     for attempt in range(max_attempts):
         if limiter is not None:
             limiter.wait()
         delay = base_delay * 2**attempt
         try:
-            response = client.get(url, params=params)
+            response = client.request(method, url, params=params, json=json)
         except httpx.TransportError as exc:
             last_problem = f"network error: {type(exc).__name__}"
         else:

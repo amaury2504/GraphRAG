@@ -1,7 +1,12 @@
 import httpx
 import pytest
 
-from graphrag.adapters.http import MinIntervalLimiter, RequestFailedError, get_with_retry
+from graphrag.adapters.http import (
+    MinIntervalLimiter,
+    RequestFailedError,
+    get_with_retry,
+    send_with_retry,
+)
 
 
 class FakeClock:
@@ -117,3 +122,20 @@ def test_limiter_is_applied_to_every_attempt() -> None:
     )
     # attempt 1: no wait; backoff 1s; attempt 2: limiter tops up to 3s total
     assert clock.sleeps == [1.0, 2.0]
+
+
+def test_post_sends_json_body_and_retries() -> None:
+    bodies: list[bytes] = []
+    queue = [httpx.Response(429), httpx.Response(200, text="ok")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        assert request.method == "POST"
+        return queue.pop(0)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = send_with_retry(
+        client, "POST", "https://x.test/a", {}, json={"ids": ["a"]}, sleep=FakeClock().sleep
+    )
+    assert response.text == "ok"
+    assert bodies == [b'{"ids":["a"]}', b'{"ids":["a"]}']
