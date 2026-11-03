@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.12.10"
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.12.10"
+      - run: uv sync --frozen
+      - name: Start the full stack
+        run: |
+          cp .env.example .env
+          docker compose up -d --build --wait
+      - name: Integration tests
+        run: |
+          set -a; . ./.env; set +a
+          uv run pytest -m integration
+      - name: API health through the container
+        run: curl --fail --silent --show-error http://localhost:8000/health
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+      - run: docker compose down -v
+        if: always()
