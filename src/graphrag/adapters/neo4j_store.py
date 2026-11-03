@@ -108,10 +108,10 @@ class Neo4jStore:
 
     def counts(self) -> GraphCounts:
         query = """
-        CALL { MATCH (a:Article) RETURN count(a) AS articles }
-        CALL { MATCH (p:Author) RETURN count(p) AS authors }
-        CALL { MATCH ()-[r:AUTHORED_BY]->() RETURN count(r) AS authored_by }
-        CALL { MATCH ()-[r:CITES]->() RETURN count(r) AS cites }
+        CALL () { MATCH (a:Article) RETURN count(a) AS articles }
+        CALL () { MATCH (p:Author) RETURN count(p) AS authors }
+        CALL () { MATCH ()-[r:AUTHORED_BY]->() RETURN count(r) AS authored_by }
+        CALL () { MATCH ()-[r:CITES]->() RETURN count(r) AS cites }
         RETURN articles, authors, authored_by, cites
         """
         with self._driver.session() as session:
