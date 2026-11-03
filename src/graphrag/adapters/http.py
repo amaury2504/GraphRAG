@@ -1,8 +1,11 @@
+import logging
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -74,6 +77,14 @@ def send_with_retry(
             else:
                 return response
         if attempt < max_attempts - 1:
+            logger.warning(
+                "%s on %s, attempt %d/%d, retrying in %.0fs",
+                last_problem,
+                url,
+                attempt + 1,
+                max_attempts,
+                delay,
+            )
             sleep(delay)
     raise RequestFailedError(f"{url} failed after {max_attempts} attempts ({last_problem})")
 

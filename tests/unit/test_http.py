@@ -154,3 +154,22 @@ def test_backoff_is_capped_by_max_delay() -> None:
         max_attempts=6,
     )
     assert clock.sleeps == [20.0, 40.0, 60.0, 60.0, 60.0]
+
+
+def test_each_retry_is_logged_with_reason_and_delay(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = client_with(httpx.Response(429), httpx.Response(200, text="ok"))
+    with caplog.at_level("WARNING", logger="graphrag.adapters.http"):
+        get_with_retry(client, "https://x.test/a", {}, sleep=FakeClock().sleep, base_delay=2.0)
+    assert [r.getMessage() for r in caplog.records] == [
+        "HTTP 429 on https://x.test/a, attempt 1/5, retrying in 2s"
+    ]
+
+
+def test_success_and_final_failure_log_no_wait_message(caplog: pytest.LogCaptureFixture) -> None:
+    client, _ = client_with(httpx.Response(503), httpx.Response(503))
+    with (
+        caplog.at_level("WARNING", logger="graphrag.adapters.http"),
+        pytest.raises(RequestFailedError),
+    ):
+        get_with_retry(client, "https://x.test/a", {}, sleep=FakeClock().sleep, max_attempts=2)
+    assert len(caplog.records) == 1  # only the wait between attempts 1 and 2

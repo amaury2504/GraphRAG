@@ -78,7 +78,7 @@ class FakeStore:
 
     def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
         self.events.append(f"cites:{len(records)}")
-        self.cited = list(records)
+        self.cited.extend(records)
 
     def article_ids(self) -> list[str]:
         return sorted(self.articles)
@@ -176,7 +176,7 @@ def test_citation_source_failure_happens_after_articles_are_safe() -> None:
             log=lambda _m: None,
         )
     assert len(store.articles) == 3
-    assert "cites:0" not in store.events  # nothing half-written on the citation side
+    assert not any(e.startswith("cites:") for e in store.events)
 
 
 def test_phase_two_uses_whole_stored_corpus_not_only_this_run() -> None:
@@ -186,3 +186,67 @@ def test_phase_two_uses_whole_stored_corpus_not_only_this_run() -> None:
     run(FakePapers(0), authors, citations, store)  # nothing new fetched
     assert authors.calls == [3]
     assert citations.calls == [3]
+
+
+def test_citations_are_written_batch_by_batch() -> None:
+    store = FakeStore()
+    known: dict[int, tuple[int, ...]] = dict.fromkeys(range(1, 251), ())
+    run(FakePapers(250), FakeAuthors(set()), FakeCitations(known), store)
+    assert [e for e in store.events if e.startswith("cites:")] == [
+        "cites:100",
+        "cites:100",
+        "cites:50",
+    ]
+
+
+def test_interruption_during_citations_keeps_the_batches_already_written() -> None:
+    class FailsOnSecondBatch:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fetch_references(self, arxiv_ids: Sequence[str]) -> list[ReferenceRecord]:
+            self.calls += 1
+            if self.calls == 2:
+                raise RuntimeError("semantic scholar down")
+            return [ReferenceRecord(i, ()) for i in arxiv_ids]
+
+    store = FakeStore()
+    with pytest.raises(RuntimeError, match="semantic scholar down"):
+        run_ingestion(
+            FakePapers(250),
+            FakeAuthors(set()),
+            FailsOnSecondBatch(),
+            store,
+            date(2025, 1, 1),
+            date(2025, 12, 31),
+            log=lambda _m: None,
+        )
+    assert len(store.cited) == 100
+
+
+def test_progress_is_logged_for_each_citation_batch() -> None:
+    messages: list[str] = []
+    run_ingestion(
+        FakePapers(150),
+        FakeAuthors(set()),
+        FakeCitations(dict.fromkeys(range(1, 151), ())),
+        FakeStore(),
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        log=messages.append,
+    )
+    refs = [m for m in messages if m.startswith("references")]
+    assert refs == [
+        "references (semantic scholar): 100/150 looked up, 100 articles known so far",
+        "references (semantic scholar): 150/150 looked up, 150 articles known so far",
+    ]
+
+
+def test_default_log_flushes_immediately(capsys: pytest.CaptureFixture[str]) -> None:
+    from unittest.mock import patch
+
+    with patch("builtins.print") as fake_print:
+        from graphrag.cli.ingest import log_line
+
+        log_line("hello")
+    fake_print.assert_called_once_with("hello", flush=True)

@@ -19,6 +19,11 @@ from graphrag.settings import Settings
 ARTICLE_BATCH = 100
 
 
+def log_line(message: str) -> None:
+    """Print at once: output redirected to a file is otherwise buffered until the end."""
+    print(message, flush=True)
+
+
 @dataclass(frozen=True, slots=True)
 class IngestionReport:
     articles_fetched: int
@@ -39,7 +44,7 @@ def run_ingestion(
     end: date,
     *,
     limit: int | None = None,
-    log: Callable[[str], None] = print,
+    log: Callable[[str], None] = log_line,
 ) -> IngestionReport:
     store.ensure_schema()
 
@@ -69,14 +74,18 @@ def run_ingestion(
         works.extend(found)
         log(f"authors (openalex): {min(offset + BATCH_SIZE, len(ids))}/{len(ids)} looked up")
 
-    # Citations are written once every article is stored, so targets always exist.
+    # Every article is stored by now, so citation targets exist: write batch by batch, which
+    # keeps progress visible in the database and survives an interruption.
     references: list[ReferenceRecord] = []
     for offset in range(0, len(ids), SEMANTIC_SCHOLAR_BATCH):
         found_refs = citations.fetch_references(ids[offset : offset + SEMANTIC_SCHOLAR_BATCH])
+        store.upsert_citations(found_refs)
         references.extend(found_refs)
         done = min(offset + SEMANTIC_SCHOLAR_BATCH, len(ids))
-        log(f"references (semantic scholar): {done}/{len(ids)} looked up")
-    store.upsert_citations(references)
+        log(
+            f"references (semantic scholar): {done}/{len(ids)} looked up, "
+            f"{len(references)} articles known so far"
+        )
 
     return IngestionReport(
         articles_fetched=fetched,
