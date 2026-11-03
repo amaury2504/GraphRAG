@@ -3,7 +3,17 @@ from datetime import date
 
 import pytest
 
-from graphrag.cli.ingest import ARTICLE_BATCH, IngestionReport, run_ingestion
+from graphrag.adapters.http import RequestFailedError
+from graphrag.cli.ingest import (
+    ARTICLE_BATCH,
+    EXIT_INCOMPLETE,
+    CitationReport,
+    IngestionReport,
+    _parse_args,
+    exit_code,
+    run_citations,
+    run_ingestion,
+)
 from graphrag.domain.models import Article, Author, GraphCounts, ReferenceRecord, WorkRecord
 
 
@@ -250,3 +260,74 @@ def test_default_log_flushes_immediately(capsys: pytest.CaptureFixture[str]) -> 
 
         log_line("hello")
     fake_print.assert_called_once_with("hello", flush=True)
+
+
+class FailingBatches:
+    """Raises RequestFailedError on the given (1-based) call numbers."""
+
+    def __init__(self, failing_calls: set[int]) -> None:
+        self.failing_calls = failing_calls
+        self.calls = 0
+
+    def fetch_references(self, arxiv_ids: Sequence[str]) -> list[ReferenceRecord]:
+        self.calls += 1
+        if self.calls in self.failing_calls:
+            raise RequestFailedError("HTTP 429")
+        return [ReferenceRecord(i, ()) for i in arxiv_ids]
+
+
+def test_exhausted_batch_is_skipped_and_the_run_goes_on() -> None:
+    store = FakeStore()
+    store.upsert_articles([article(n) for n in range(1, 251)])
+    source = FailingBatches({2})
+    report = run_citations(source, store, store.article_ids(), log=lambda _m: None)
+    assert source.calls == 3
+    assert len(store.cited) == 150
+    assert report == CitationReport(
+        found=150, missing=0, without_arxiv_references=150, failed_batches=1
+    )
+
+
+def test_skipped_ids_are_not_counted_as_missing() -> None:
+    store = FakeStore()
+    store.upsert_articles([article(n) for n in range(1, 4)])
+    report = run_citations(FailingBatches({1}), store, store.article_ids(), log=lambda _m: None)
+    assert (report.found, report.missing, report.failed_batches) == (0, 0, 1)
+
+
+def test_skipped_batch_is_logged() -> None:
+    store = FakeStore()
+    store.upsert_articles([article(n) for n in range(1, 4)])
+    messages: list[str] = []
+    run_citations(FailingBatches({1}), store, store.article_ids(), log=messages.append)
+    assert messages == ["references (semantic scholar): 3/3 batch skipped (HTTP 429)"]
+
+
+def test_full_run_reports_failed_citation_batches() -> None:
+    class AlwaysBusy:
+        def fetch_references(self, arxiv_ids: Sequence[str]) -> list[ReferenceRecord]:
+            raise RequestFailedError("HTTP 429")
+
+    store = FakeStore()
+    report = run_ingestion(
+        FakePapers(3),
+        FakeAuthors(set()),
+        AlwaysBusy(),
+        store,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        log=lambda _m: None,
+    )
+    assert report.citation_batches_failed == 1
+    assert len(store.articles) == 3
+
+
+@pytest.mark.parametrize(("failed", "code"), [(0, 0), (1, EXIT_INCOMPLETE), (5, EXIT_INCOMPLETE)])
+def test_exit_code_tells_whether_a_rerun_is_needed(failed: int, code: int) -> None:
+    assert exit_code(failed) == code
+    assert EXIT_INCOMPLETE not in (0, 1, 2)  # distinct from success, crash and argparse errors
+
+
+def test_citations_only_flag() -> None:
+    assert _parse_args(["--citations-only"]).citations_only is True
+    assert _parse_args([]).citations_only is False
