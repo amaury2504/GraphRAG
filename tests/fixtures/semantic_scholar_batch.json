@@ -1,0 +1,26 @@
+[
+  {
+    "paperId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "externalIds": {"ArXiv": "2401.00001", "DOI": "10.0000/fake.1", "CorpusId": 1},
+    "references": [
+      {
+        "paperId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "externalIds": {"ACL": "fake.acl-main.1", "DOI": "10.0000/fake.2", "CorpusId": 2}
+      },
+      {
+        "paperId": "cccccccccccccccccccccccccccccccccccccccc",
+        "externalIds": {"ArXiv": "2312.00002", "DOI": "10.0000/fake.3", "CorpusId": 3}
+      },
+      {
+        "paperId": "dddddddddddddddddddddddddddddddddddddddd",
+        "externalIds": {"ArXiv": "2401.00003", "CorpusId": 4}
+      }
+    ]
+  },
+  null,
+  {
+    "paperId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "externalIds": {"ArXiv": "2401.00003", "CorpusId": 4},
+    "references": []
+  }
+]
