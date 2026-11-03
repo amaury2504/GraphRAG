@@ -4,14 +4,13 @@ from typing import Any
 
 import neo4j
 
-from graphrag.domain.models import Article, GraphCounts, WorkRecord
+from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
 
 WRITE_BATCH = 500
 
 SCHEMA = (
     "CREATE CONSTRAINT article_arxiv_id IF NOT EXISTS FOR (a:Article) REQUIRE a.arxiv_id IS UNIQUE",
     "CREATE CONSTRAINT author_key IF NOT EXISTS FOR (a:Author) REQUIRE a.key IS UNIQUE",
-    "CREATE INDEX article_openalex_id IF NOT EXISTS FOR (a:Article) ON (a.openalex_id)",
 )
 
 UPSERT_ARTICLES = """
@@ -39,8 +38,8 @@ SET r.position = author.position
 UPSERT_CITATIONS = """
 UNWIND $rows AS row
 MATCH (s:Article {arxiv_id: row.arxiv_id})
-UNWIND row.refs AS ref
-MATCH (t:Article {openalex_id: ref})
+UNWIND row.cited AS cited_id
+MATCH (t:Article {arxiv_id: cited_id})
 WHERE t <> s
 MERGE (s)-[:CITES]->(t)
 """
@@ -97,8 +96,8 @@ class Neo4jStore:
         ]
         self._write(UPSERT_WORKS, rows)
 
-    def upsert_citations(self, records: Sequence[WorkRecord]) -> None:
-        rows = [{"arxiv_id": r.arxiv_id, "refs": list(r.referenced_openalex_ids)} for r in records]
+    def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
+        rows = [{"arxiv_id": r.arxiv_id, "cited": list(r.cited_arxiv_ids)} for r in records]
         self._write(UPSERT_CITATIONS, rows)
 
     def article_ids(self) -> list[str]:

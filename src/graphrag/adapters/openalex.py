@@ -32,7 +32,7 @@ class OpenAlexSource:
             API_URL,
             {
                 "filter": "doi:" + "|".join(arxiv_doi_url(i) for i in arxiv_ids),
-                "select": "id,doi,authorships,referenced_works",
+                "select": "id,doi,authorships",
                 "per_page": BATCH_SIZE,
             },
             sleep=self._sleep,
@@ -60,9 +60,6 @@ def parse_works(payload: dict[str, Any]) -> list[WorkRecord]:
                 arxiv_id=arxiv_id,
                 openalex_id=short_openalex_id(work["id"]),
                 authors=authors,
-                referenced_openalex_ids=tuple(
-                    short_openalex_id(r) for r in work.get("referenced_works") or []
-                ),
             ),
         )
     return list(records.values())

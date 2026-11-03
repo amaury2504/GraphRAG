@@ -2,7 +2,7 @@ from collections.abc import Iterator, Sequence
 from datetime import date
 from typing import Protocol
 
-from graphrag.domain.models import Article, GraphCounts, WorkRecord
+from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
 
 
 class PaperSource(Protocol):
@@ -11,9 +11,15 @@ class PaperSource(Protocol):
         ...
 
 
-class CitationSource(Protocol):
+class AuthorSource(Protocol):
     def fetch_works(self, arxiv_ids: Sequence[str]) -> list[WorkRecord]:
         """Return records for the ids the source knows; unknown ids are simply absent."""
+        ...
+
+
+class CitationSource(Protocol):
+    def fetch_references(self, arxiv_ids: Sequence[str]) -> list[ReferenceRecord]:
+        """Return the cited arXiv ids of each known article; unknown ids are simply absent."""
         ...
 
 
@@ -28,7 +34,7 @@ class GraphStore(Protocol):
         """Attach OpenAlex ids, authors and AUTHORED_BY relations. Idempotent."""
         ...
 
-    def upsert_citations(self, records: Sequence[WorkRecord]) -> None:
+    def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
         """Create CITES relations between corpus articles only. Idempotent."""
         ...
 

@@ -20,12 +20,19 @@ class Author:
 
 @dataclass(frozen=True, slots=True)
 class WorkRecord:
-    """What the citation source knows about one article of the corpus."""
+    """What the author source knows about one article of the corpus."""
 
     arxiv_id: str
     openalex_id: str
     authors: tuple[Author, ...]
-    referenced_openalex_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceRecord:
+    """The arXiv articles cited by one article (only references that have an arXiv id)."""
+
+    arxiv_id: str
+    cited_arxiv_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)

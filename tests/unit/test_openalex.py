@@ -17,10 +17,6 @@ def test_parse_real_payload() -> None:
     assert lewis.authors[0].key == "A5063377058"
     assert lewis.authors[0].name == "Patrick Lewis"
     assert len(lewis.authors) == 12
-    assert len(lewis.referenced_openalex_ids) == 59
-    assert all(r.startswith("W") for r in lewis.referenced_openalex_ids)
-    # Known coverage gap: this survey has no references in OpenAlex.
-    assert records["2312.10997"].referenced_openalex_ids == ()
 
 
 def test_parse_skips_non_arxiv_and_authors_without_id() -> None:
@@ -36,14 +32,12 @@ def test_parse_skips_non_arxiv_and_authors_without_id() -> None:
                     {"author": {"id": None, "display_name": "Ghost"}},
                     {"author": None},
                 ],
-                "referenced_works": None,
             },
         ]
     }
     records = parse_works(payload)
     assert [r.arxiv_id for r in records] == ["2401.00001"]
     assert [a.key for a in records[0].authors] == ["A1"]
-    assert records[0].referenced_openalex_ids == ()
 
 
 def test_parse_deduplicates_same_arxiv_id() -> None:

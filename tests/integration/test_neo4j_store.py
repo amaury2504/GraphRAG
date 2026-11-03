@@ -13,7 +13,7 @@ import pytest
 
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.cli.ingest import run_ingestion
-from graphrag.domain.models import Article, Author, GraphCounts, WorkRecord
+from graphrag.domain.models import Article, Author, GraphCounts, ReferenceRecord, WorkRecord
 
 pytestmark = pytest.mark.integration
 
@@ -57,11 +57,12 @@ def art(n: int, title: str = "T") -> Article:
 
 
 A, B, C = art(1), art(2), art(3)
-RECORDS = [
-    # A cites B, an out-of-corpus work, and itself (must be ignored)
-    WorkRecord(A.arxiv_id, "WTEST1", (Author("ATEST1", "Ann"),), ("WTEST2", "WOUTSIDE", "WTEST1")),
-    WorkRecord(B.arxiv_id, "WTEST2", (Author("ATEST1", "Ann"), Author("ATEST2", "Bob")), ()),
+WORKS = [
+    WorkRecord(A.arxiv_id, "WTEST1", (Author("ATEST1", "Ann"),)),
+    WorkRecord(B.arxiv_id, "WTEST2", (Author("ATEST1", "Ann"), Author("ATEST2", "Bob"))),
 ]
+# A cites B, an out-of-corpus paper, and itself (must be ignored)
+REFERENCES = [ReferenceRecord(A.arxiv_id, (B.arxiv_id, "9998.00001", A.arxiv_id))]
 
 
 def delta(before: GraphCounts, after: GraphCounts) -> tuple[int, int, int, int]:
@@ -107,8 +108,8 @@ def test_existing_article_is_not_reinserted_or_modified(store: Neo4jStore) -> No
 def test_works_and_citations_build_expected_graph(store: Neo4jStore) -> None:
     before = store.counts()
     store.upsert_articles([A, B, C])
-    store.upsert_works(RECORDS)
-    store.upsert_citations(RECORDS)
+    store.upsert_works(WORKS)
+    store.upsert_citations(REFERENCES)
     # 3 articles; authors ATEST1 shared by 2 articles; 3 AUTHORED_BY; 1 CITES (A->B only)
     assert delta(before, store.counts()) == (3, 2, 3, 1)
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
@@ -127,8 +128,8 @@ def test_works_and_citations_build_expected_graph(store: Neo4jStore) -> None:
 def test_writing_twice_adds_nothing(store: Neo4jStore) -> None:
     def write() -> None:
         store.upsert_articles([A, B, C])
-        store.upsert_works(RECORDS)
-        store.upsert_citations(RECORDS)
+        store.upsert_works(WORKS)
+        store.upsert_citations(REFERENCES)
 
     before = store.counts()
     write()
@@ -156,14 +157,25 @@ class FakePapers:
             yield a
 
 
-class FakeCitations:
+class FakeAuthors:
     def fetch_works(self, arxiv_ids: Sequence[str]) -> list[WorkRecord]:
-        return [r for r in RECORDS if r.arxiv_id in arxiv_ids]
+        return [r for r in WORKS if r.arxiv_id in arxiv_ids]
+
+
+class FakeCitations:
+    def fetch_references(self, arxiv_ids: Sequence[str]) -> list[ReferenceRecord]:
+        return [r for r in REFERENCES if r.arxiv_id in arxiv_ids]
 
 
 def ingest(store: Neo4jStore, papers: FakePapers) -> GraphCounts:
     report = run_ingestion(
-        papers, FakeCitations(), store, date(2025, 1, 1), date(2025, 12, 31), log=lambda _m: None
+        papers,
+        FakeAuthors(),
+        FakeCitations(),
+        store,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        log=lambda _m: None,
     )
     return report.counts
 

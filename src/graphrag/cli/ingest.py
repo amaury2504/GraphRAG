@@ -10,8 +10,10 @@ import httpx
 from graphrag.adapters.arxiv import ArxivSource
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.openalex import BATCH_SIZE, OpenAlexSource
-from graphrag.domain.models import Article, GraphCounts, WorkRecord
-from graphrag.ports.ingestion import CitationSource, GraphStore, PaperSource
+from graphrag.adapters.semantic_scholar import BATCH_SIZE as SEMANTIC_SCHOLAR_BATCH
+from graphrag.adapters.semantic_scholar import SemanticScholarSource
+from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
+from graphrag.ports.ingestion import AuthorSource, CitationSource, GraphStore, PaperSource
 from graphrag.settings import Settings
 
 ARTICLE_BATCH = 100
@@ -20,14 +22,17 @@ ARTICLE_BATCH = 100
 @dataclass(frozen=True, slots=True)
 class IngestionReport:
     articles_fetched: int
-    works_found: int
-    works_missing: int
-    works_without_references: int
+    authors_found: int
+    authors_missing: int
+    references_found: int
+    references_missing: int
+    without_arxiv_references: int
     counts: GraphCounts
 
 
 def run_ingestion(
     papers: PaperSource,
+    authors: AuthorSource,
     citations: CitationSource,
     store: GraphStore,
     start: date,
@@ -55,21 +60,31 @@ def run_ingestion(
         store.upsert_articles(batch)
     log(f"articles: {fetched} fetched (done)")
 
-    # Phase 2: authors and citations from the whole stored corpus, so reruns stay consistent.
+    # Phase 2: authors and citations for the whole stored corpus, so reruns stay consistent.
     ids = store.article_ids()
-    records: list[WorkRecord] = []
+    works: list[WorkRecord] = []
     for offset in range(0, len(ids), BATCH_SIZE):
-        found = citations.fetch_works(ids[offset : offset + BATCH_SIZE])
+        found = authors.fetch_works(ids[offset : offset + BATCH_SIZE])
         store.upsert_works(found)
-        records.extend(found)
-        log(f"openalex: {min(offset + BATCH_SIZE, len(ids))}/{len(ids)} looked up")
-    store.upsert_citations(records)
+        works.extend(found)
+        log(f"authors (openalex): {min(offset + BATCH_SIZE, len(ids))}/{len(ids)} looked up")
+
+    # Citations are written once every article is stored, so targets always exist.
+    references: list[ReferenceRecord] = []
+    for offset in range(0, len(ids), SEMANTIC_SCHOLAR_BATCH):
+        found_refs = citations.fetch_references(ids[offset : offset + SEMANTIC_SCHOLAR_BATCH])
+        references.extend(found_refs)
+        done = min(offset + SEMANTIC_SCHOLAR_BATCH, len(ids))
+        log(f"references (semantic scholar): {done}/{len(ids)} looked up")
+    store.upsert_citations(references)
 
     return IngestionReport(
         articles_fetched=fetched,
-        works_found=len(records),
-        works_missing=len(ids) - len(records),
-        works_without_references=sum(1 for r in records if not r.referenced_openalex_ids),
+        authors_found=len(works),
+        authors_missing=len(ids) - len(works),
+        references_found=len(references),
+        references_missing=len(ids) - len(references),
+        without_arxiv_references=sum(1 for r in references if not r.cited_arxiv_ids),
         counts=store.counts(),
     )
 
@@ -97,6 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = run_ingestion(
             ArxivSource(client),
             OpenAlexSource(client),
+            SemanticScholarSource(client),
             store,
             args.since,
             args.until,
