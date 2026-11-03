@@ -53,7 +53,7 @@ tests/
 # lancer les tests           : uv run pytest                (unitaires, sans réseau)
 #                              uv run pytest -m integration (nécessite les services ; charger .env)
 # lint et types              : uv run ruff check . && uv run ruff format --check . && uv run mypy
-# ingestion                  : (à définir)
+# ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
 # évaluation                 : (à définir)
 # rapport d'usage            : (à définir)
 ```
