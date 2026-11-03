@@ -54,6 +54,7 @@ tests/
 #                              uv run pytest -m integration (nécessite les services ; charger .env)
 # lint et types              : uv run ruff check . && uv run ruff format --check . && uv run mypy
 # ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
+#                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
 # évaluation                 : (à définir)
 # rapport d'usage            : (à définir)
 ```

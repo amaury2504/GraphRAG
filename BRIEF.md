@@ -18,6 +18,7 @@
 - **Corpus « A »** : catégories cs.CL/IR/AI/LG, résumé contenant « retrieval-augmented » (ou « retrieval augmented »), 12 mois. 2 829 articles comptés le 2026-11-03. Titres et résumés seulement.
 - **Auteurs : OpenAlex**, sans clé, par DOI arXiv (`10.48550/arXiv.<id>`), lots de 100. Créés uniquement en phase 2, avec leurs ids OpenAlex. Un article inconnu d'OpenAlex n'a pas de nœud `Auteur` (environ 20 % sur le lot).
 - **Citations : Semantic Scholar**, sans clé, `POST /graph/v1/paper/batch`, lots de 100. OpenAlex a été écarté pour les citations : il renvoie 0 référence pour la plupart des articles arXiv. `CITES` seulement entre articles du corpus.
+- **Reprise des citations** (2026-11-03) : fichier local `data/citations_checked.txt` (ignoré par git, rien dans le graphe), un id par ligne, marqué après l'écriture des `CITES`. `--citations-only` saute arXiv/OpenAlex, `--recheck-citations` ignore le fichier (à utiliser si Neo4j a été vidé). Un lot dont les essais sont épuisés est sauté ; code de sortie 3 = relancer plus tard.
 - **Clés d'unicité** : `Article.arxiv_id` (sans version), `Author.key` (id OpenAlex). Écriture par `MERGE` en lots de 500. Un article déjà présent n'est jamais modifié (`ON CREATE SET`).
 
 ## 3. Décisions encore ouvertes (à proposer en deux options, jamais à trancher seul)
