@@ -60,7 +60,10 @@ tests/
 #                              (titre + morceau → bge-small → Neo4j ; ne traite que les articles sans morceaux)
 # question (API)             : POST /ask {"question": "...", "mode": "vector"|"hybrid", "k": 5}
 #                              (nécessite MISTRAL_API_KEY ; modèle chargé au 1er appel ; doc interactive sur /docs)
-# évaluation                 : (à définir)
+# évaluation (recherche)     : uv run python -m graphrag.cli.evaluate [--ks 1 3 5 10] [--include-unvalidated]
+#                              (rappel@k et MRR pour vector et hybrid, sans LLM ; questions dans eval/questions.jsonl,
+#                              seules celles avec "validated": true sont utilisées ; rapport JSON dans eval/results/)
+# évaluation (réponses)      : (à définir)
 # rapport d'usage            : (à définir)
 ```
 

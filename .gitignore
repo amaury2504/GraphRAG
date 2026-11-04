@@ -11,3 +11,6 @@ htmlcov/
 # Local data and exports (never commit graph exports: third-party data licences)
 data/
 exports/
+
+# Evaluation reports are regenerated; commit one on purpose if it is a deliverable
+eval/results/
