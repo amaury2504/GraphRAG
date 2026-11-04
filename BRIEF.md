@@ -24,7 +24,8 @@
 ## 3. Décisions encore ouvertes (à proposer en deux options, jamais à trancher seul)
 
 - **Version de Neo4j** : 5.26.32 LTS est en place **à titre provisoire**. Alternative : 2026.10. Vérifier dans la doc officielle le support des index vectoriels et texte intégral avant l'étape 3.
-- **Modèle d'embeddings** (et de reranking), **fournisseur de LLM**, **budget d'appels**.
+- **Modèle d'embeddings** (et de reranking) : proposé `bge-small-en-v1.5` (local, 512 tokens) contre `all-MiniLM-L6-v2` (coupe à 256 sous-mots, trop court pour nos morceaux de 200 mots).
+- **Fournisseur de LLM** : décidé le 2026-11-04, **Mistral par l'API** (clé `MISTRAL_API_KEY` dans `.env`, offre de l'utilisateur dans Mistral Studio). Test du 2026-11-04 avec `mistral-small-latest` : 200, limites 100 requêtes/min et 100 000 tokens/min. Claude Haiku 5.5 reste l'option de secours (environ 0,50 $ pour la V1). Choix du modèle Mistral exact et budget encore à fixer.
 - **Fusion de la recherche hybride** : décidé le 2026-11-03, option A (Reciprocal Rank Fusion, `1/(60 + rang)`, fusion en Python dans `pipeline/`). **Option B à essayer après l'étape 4** : somme pondérée de scores normalisés (min-max, poids à régler sur le jeu de test), si le jeu de test montre un écart.
 - Normalisation des noms de méthodes/benchmarks (avant l'étape 6), taille du lot d'extraction, nombre de testeurs, seuils de latence et de coût.
 - Licence du dépôt (aucun fichier `LICENSE` pour l'instant).
