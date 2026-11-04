@@ -89,6 +89,27 @@ def test_a_gap_whose_interval_excludes_zero_is_starred() -> None:
     assert "+1.00 [+1.00, +1.00]*" in text
 
 
+def test_no_star_under_ten_questions_even_if_the_interval_excludes_zero() -> None:
+    def gap(n: int) -> str:
+        questions = [q(f"f{i}", "factual", "A") for i in range(n)]
+        results = evaluate_retrieval(
+            questions,
+            {
+                "base": Scripted({f"f{i}?": ["x"] for i in range(n)}),
+                "better": Scripted({f"f{i}?": ["A"] for i in range(n)}),
+            },
+            (1,),
+            clock=lambda: 0.0,
+        )
+        diffs = paired_differences(results["base"], results["better"], (1,))
+        return format_differences("base", "better", diffs, {"all": n, "factual": n}, (1,))
+
+    assert "+1.00 [+1.00, +1.00]*" in gap(10)
+    assert "+1.00 [+1.00, +1.00] " in gap(9)
+    assert "*" not in gap(9).splitlines()[2]
+    assert "Never starred under 10 questions" in gap(9)
+
+
 def test_a_significantly_worse_configuration_is_starred_too() -> None:
     questions = [q(f"f{i}", "factual", "A") for i in range(12)]
     results = evaluate_retrieval(

@@ -31,6 +31,7 @@ from graphrag.settings import Settings
 
 RESULTS_DIR = Path("eval/results")
 MIN_QUESTIONS_NOTE = 30
+MIN_QUESTIONS_FOR_STAR = 10
 
 
 def select_questions(
@@ -52,8 +53,9 @@ def format_table(name: str, summaries: Mapping[str, GroupSummary], ks: Sequence[
     return "\n".join(lines)
 
 
-def _interval(summary: Summary) -> str:
-    mark = "*" if summary.low > 0 or summary.high < 0 else " "
+def _interval(summary: Summary, n: int) -> str:
+    excludes_zero = summary.low > 0 or summary.high < 0
+    mark = "*" if excludes_zero and n >= MIN_QUESTIONS_FOR_STAR else " "
     return f"{summary.mean:+.2f} [{summary.low:+.2f}, {summary.high:+.2f}]{mark}"
 
 
@@ -70,11 +72,14 @@ def format_differences(
         f"{'group':<12}{'n':>4}  {'MRR':<26}{focus:<26}",
     ]
     for group, metrics in differences.items():
-        lines.append(
-            f"{group:<12}{sizes[group]:>4}  {_interval(metrics['mrr']):<26}"
-            f"{_interval(metrics[focus]):<26}"
-        )
-    lines.append("* = the interval excludes 0; otherwise the gap may be chance.")
+        n = sizes[group]
+        mrr_cell = _interval(metrics["mrr"], n)
+        focus_cell = _interval(metrics[focus], n)
+        lines.append(f"{group:<12}{n:>4}  {mrr_cell:<26}{focus_cell:<26}")
+    lines.append(
+        "* = the interval excludes 0; otherwise the gap may be chance. "
+        f"Never starred under {MIN_QUESTIONS_FOR_STAR} questions: the interval is then too narrow."
+    )
     return "\n".join(lines)
 
 
