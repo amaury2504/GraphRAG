@@ -169,3 +169,17 @@ def test_duplicate_ids_are_rejected() -> None:
     check_unique_ids([first, parse_question(raw(id="q2"))])
     with pytest.raises(ValueError, match="duplicate question id q1"):
         check_unique_ids([first, first])
+
+
+def test_style_defaults_to_named_and_is_validated() -> None:
+    base = {
+        "id": "q1",
+        "type": "factual",
+        "question": "What?",
+        "expected_answer": "That.",
+        "expected_articles": ["2401.00001"],
+    }
+    assert parse_question(base).style == "named"
+    assert parse_question({**base, "style": "descriptive"}).style == "descriptive"
+    with pytest.raises(ValueError, match="q1: style must be one of"):
+        parse_question({**base, "style": "vague"})

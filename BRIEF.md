@@ -174,6 +174,8 @@ Trois mesures faites à l'instant :
 
 ---
 
+> **Mise à jour (2026-11-04, plus tard)** : le point 1 est implémenté (champ `style`, `--style named|descriptive`, détecteur de fuite à fréquence ≤ 3, `title_overlap` enregistré, tableaux par style dans `evaluate`). Reste : générer les 10 questions (3 factuelles + 2 comparatives descriptives, 2 factuelles + 3 comparatives nommées) après accord sur l'appel Mistral.
+
 ### La décision immédiate
 Les 10 questions attendent, avec leurs groupes d'articles déjà choisis. Je propose de faire **d'abord le point 1** (style descriptif et détecteur de fuite, environ une heure, testé), puis de générer les 10 questions en deux moitiés : 5 descriptives et 5 nommées. Sinon, elles hériteront toutes du biais des noms. On fait comme ça, ou je génère tout de suite avec la consigne actuelle ?
 

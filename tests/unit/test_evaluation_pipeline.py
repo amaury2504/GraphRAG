@@ -134,3 +134,46 @@ def test_paired_differences_need_the_same_questions() -> None:
     results = evaluate_retrieval(QUESTIONS, {"good": GOOD}, ks=(1,))["good"]
     with pytest.raises(ValueError, match="same questions"):
         paired_differences(results, results[:2], ks=(1,))
+
+
+def styled(qid: str, style: str, *articles: str) -> EvalQuestion:
+    return EvalQuestion(
+        qid,
+        "factual",
+        f"question {qid}?",
+        "a",
+        articles,
+        {},
+        True,
+        style,  # type: ignore[arg-type]
+    )
+
+
+STYLED = [styled("n1", "named", "A"), styled("d1", "descriptive", "B")]
+
+
+def test_results_carry_the_style_and_summaries_split_by_style_when_both_occur() -> None:
+    results = evaluate_retrieval(
+        STYLED, {"r": ScriptedRetriever({"question n1?": ["A"], "question d1?": ["x"]})}, ks=(1,)
+    )
+    assert [r.style for r in results["r"]] == ["named", "descriptive"]
+    summaries = summarize_results(results["r"], (1,))
+    assert summaries["named"].mrr.mean == 1.0
+    assert summaries["descriptive"].mrr.mean == 0.0
+    assert summaries["named"].n == summaries["descriptive"].n == 1
+
+
+def test_no_style_group_when_only_one_style_is_present() -> None:
+    results = evaluate_retrieval(QUESTIONS, {"good": GOOD}, ks=(1,))
+    assert set(summarize_results(results["good"], (1,))) == {ALL, "factual", "comparative"}
+
+
+def test_paired_differences_are_also_split_by_style() -> None:
+    script = {"question n1?": ["A"], "question d1?": ["x"]}
+    better = {"question n1?": ["A"], "question d1?": ["B"]}
+    results = evaluate_retrieval(
+        STYLED, {"a": ScriptedRetriever(script), "b": ScriptedRetriever(better)}, ks=(1,)
+    )
+    diffs = paired_differences(results["a"], results["b"], (1,))
+    assert diffs["descriptive"]["mrr"].mean == 1.0
+    assert diffs["named"]["mrr"].mean == 0.0

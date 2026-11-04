@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from graphrag.domain.evaluation import (
+    QUESTION_STYLES,
     QUESTION_TYPES,
     EvalQuestion,
     Summary,
@@ -29,6 +30,7 @@ class QuestionResult:
     recall: Mapping[int, float]  # k -> recall@k
     reciprocal_rank: float
     seconds: float
+    style: str = "named"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +68,7 @@ def evaluate_retrieval(
                     recall={k: recall_at_k(groups, retrieved, k) for k in ks},
                     reciprocal_rank=reciprocal_rank(groups, retrieved),
                     seconds=seconds,
+                    style=question.style,
                 )
             )
         results[name] = per_question
@@ -81,15 +84,29 @@ def _group(results: Sequence[QuestionResult], ks: Sequence[int]) -> GroupSummary
     )
 
 
+def _style_groups[T](items: Sequence[T], style_of: Callable[[T], str]) -> dict[str, list[T]]:
+    """One group per style, only when both occur: a single style would just repeat "all"."""
+    present = {style_of(item) for item in items}
+    if len(present) < 2:
+        return {}
+    return {
+        style: [item for item in items if style_of(item) == style]
+        for style in QUESTION_STYLES
+        if style in present
+    }
+
+
 def summarize_results(
     results: Sequence[QuestionResult], ks: Sequence[int] = DEFAULT_KS
 ) -> dict[str, GroupSummary]:
-    """Overall summary under "all", then one per question type that has questions."""
+    """Overall summary under "all", then per question type, then per style (if both occur)."""
     summaries = {ALL: _group(results, ks)}
     for kind in QUESTION_TYPES:
         of_type = [r for r in results if r.type == kind]
         if of_type:
             summaries[kind] = _group(of_type, ks)
+    for style, members in _style_groups(results, lambda r: r.style).items():
+        summaries[style] = _group(members, ks)
     return summaries
 
 
@@ -112,6 +129,7 @@ def paired_differences(
         pairs = [(a, b) for a, b in zip(baseline, other, strict=True) if a.type == kind]
         if pairs:
             groups[kind] = pairs
+    groups.update(_style_groups(list(zip(baseline, other, strict=True)), lambda p: p[0].style))
     differences: dict[str, dict[str, Summary]] = {}
     for name, pairs in groups.items():
         metrics = {"mrr": summarize([b.reciprocal_rank - a.reciprocal_rank for a, b in pairs])}

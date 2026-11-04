@@ -7,16 +7,20 @@ import pytest
 from graphrag.domain.evaluation import QUESTION_TYPES, QuestionType, parse_question
 from graphrag.domain.models import Article, Completion, SearchHit, Usage
 from graphrag.pipeline.question_generation import (
+    DESCRIPTIVE_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     QuestionPlan,
     UnrelatedArticlesError,
     build_prompt,
     choose_group,
+    find_title_leak,
     find_vague_wording,
     generate_candidates,
     parse_generation,
     plan_questions,
     title_groups,
+    title_overlap,
+    title_word_frequencies,
     topic_neighbours,
     write_question,
 )
@@ -414,3 +418,139 @@ def test_prompt_asks_to_flag_inferences_and_incomparable_figures() -> None:
 def test_planning_can_be_limited_to_some_types() -> None:
     plans = plan(per_type=2, types=("comparative", "evolutive"))
     assert [p.type for p in plans] == ["comparative"] * 2 + ["evolutive"] * 2
+
+
+# --- descriptive style and title-leak detector ---------------------------------------------
+
+TITLES = [
+    "ARIA: Adaptive Retrieval for Agents",
+    "Retrieval for Agents in Practice",
+    "Adaptive Retrieval Methods",
+    "Retrieval Evaluation Survey",
+]
+TITLE_ARTICLES = [art(n, title=t) for n, t in enumerate(TITLES, start=1)]
+FREQ = title_word_frequencies(TITLE_ARTICLES)
+
+
+def test_title_word_frequencies_count_distinct_titles_and_skip_function_words() -> None:
+    assert FREQ["retrieval"] == 4
+    assert FREQ["aria"] == 1
+    assert FREQ["agents"] == 2
+    assert "for" not in FREQ
+    assert "in" not in FREQ
+
+
+def test_twin_titles_count_once_in_the_frequencies() -> None:
+    twins = [art(1, title="Zeta Method"), art(2, title="zeta  method")]
+    assert title_word_frequencies(twins)["zeta"] == 1
+
+
+def test_a_rare_title_word_is_a_leak() -> None:
+    assert find_title_leak("How does ARIA choose what to fetch?", TITLES[:1], FREQ) == "aria"
+
+
+def test_a_common_title_word_is_not_a_leak() -> None:
+    assert find_title_leak("How does retrieval adapt to its inputs?", TITLES[:1], FREQ) is None
+
+
+def test_the_frequency_limit_is_inclusive() -> None:
+    assert find_title_leak("agents", TITLES[:1], FREQ, max_frequency=2) == "agents"
+    assert find_title_leak("agents", TITLES[:1], FREQ, max_frequency=1) is None
+
+
+def test_only_words_of_the_expected_titles_count() -> None:
+    # "aria" is rare but belongs to another article's title: not a leak for this question
+    assert find_title_leak("What is aria?", TITLES[1:], FREQ) is None
+
+
+def test_a_word_missing_from_the_frequencies_counts_as_rare() -> None:
+    assert find_title_leak("zorblax", ["Zorblax"], {}) == "zorblax"
+
+
+def test_the_first_leak_in_alphabetical_order_is_reported() -> None:
+    assert find_title_leak("zeta and alpha", ["Zeta Alpha"], {}) == "alpha"
+
+
+def test_title_overlap_is_the_share_of_question_words_found_in_titles() -> None:
+    # content words: aria, choose, fetch -> only "aria" is in the title
+    assert title_overlap("How does ARIA choose what to fetch?", TITLES[:1]) == 0.333
+    assert title_overlap("", TITLES[:1]) == 0.0
+    assert title_overlap("anything", []) == 0.0
+
+
+LEAKY = '{"question": "How does ARIA decide when to retrieve?", "expected_answer": "A."}'
+CLEAN = '{"question": "How can an agent decide when to retrieve?", "expected_answer": "B."}'
+DESCRIPTIVE = QuestionPlan("factual", (TITLE_ARTICLES[0],), "descriptive")
+
+
+def test_a_descriptive_plan_uses_the_descriptive_prompt() -> None:
+    llm = ScriptedLLM([CLEAN])
+    write_question(DESCRIPTIVE, llm, FREQ)
+    assert llm.prompts[0][0] == DESCRIPTIVE_SYSTEM_PROMPT
+    assert DESCRIPTIVE_SYSTEM_PROMPT != SYSTEM_PROMPT
+    assert "Do NOT use the name" in DESCRIPTIVE_SYSTEM_PROMPT
+    assert "Do NOT use the name" not in SYSTEM_PROMPT
+
+
+def test_both_prompts_share_the_answer_rules() -> None:
+    for prompt in (SYSTEM_PROMPT, DESCRIPTIVE_SYSTEM_PROMPT):
+        assert "the abstracts do not" in prompt
+        assert '{"skip"' in prompt
+
+
+def test_a_leaking_descriptive_question_is_rewritten_once_with_the_word() -> None:
+    llm = ScriptedLLM([LEAKY, CLEAN])
+    question, _ = write_question(DESCRIPTIVE, llm, FREQ)
+    assert question == "How can an agent decide when to retrieve?"
+    assert "'aria'" in llm.prompts[1][1]
+    assert "Your previous question was rejected" in llm.prompts[1][1]
+
+
+def test_a_question_still_leaking_after_the_rewrite_fails() -> None:
+    llm = ScriptedLLM([LEAKY, LEAKY, CLEAN])
+    with pytest.raises(ValueError, match="still names the article after a rewrite: 'aria'"):
+        write_question(DESCRIPTIVE, llm, FREQ)
+    assert len(llm.prompts) == 2
+
+
+def test_a_named_question_may_use_the_names() -> None:
+    llm = ScriptedLLM([LEAKY])
+    named = QuestionPlan("factual", (TITLE_ARTICLES[0],), "named")
+    assert write_question(named, llm, FREQ)[0].startswith("How does ARIA")
+    assert len(llm.prompts) == 1
+
+
+def test_a_descriptive_plan_without_frequencies_is_refused_before_any_call() -> None:
+    llm = ScriptedLLM([CLEAN])
+    with pytest.raises(ValueError, match="needs the title word frequencies"):
+        write_question(DESCRIPTIVE, llm)
+    assert llm.prompts == []
+
+
+def test_a_vague_descriptive_question_is_told_to_describe() -> None:
+    llm = ScriptedLLM([VAGUE, CLEAN])
+    write_question(QuestionPlan("comparative", (art(2), art(3)), "descriptive"), llm, FREQ)
+    assert "describing the specific problem" in llm.prompts[1][1]
+
+
+def test_candidates_record_style_and_overlap() -> None:
+    plans = [DESCRIPTIVE, QuestionPlan("factual", (TITLE_ARTICLES[1],))]
+    records, failures = generate_candidates(
+        plans,
+        ScriptedLLM([CLEAN, GOOD]),
+        title_groups(TITLE_ARTICLES),
+        frequencies=FREQ,
+        log=lambda _m: None,
+    )
+    assert failures == []
+    assert [r["style"] for r in records] == ["descriptive", "named"]
+    assert records[0]["title_overlap"] == 0.0  # no content word of the question is in the title
+    assert all(parse_question(r).style == r["style"] for r in records)
+
+
+def test_planning_passes_the_style_to_every_plan() -> None:
+    plans = plan_questions(
+        CORPUS, FakeSearch(40), FakeEmbedder(), per_type=2, seed=7, style="descriptive"
+    )
+    assert {p.style for p in plans} == {"descriptive"}
+    assert {p.style for p in plan(per_type=1)} == {"named"}

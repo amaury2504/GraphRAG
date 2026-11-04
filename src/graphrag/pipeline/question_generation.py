@@ -10,14 +10,14 @@ written with `validated: false`; a person reads, fixes and validates each one.
 import json
 import random
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain, zip_longest
 from typing import Any, cast
 
 from graphrag.domain.chunking import search_text
-from graphrag.domain.evaluation import QUESTION_TYPES, QuestionType
+from graphrag.domain.evaluation import QUESTION_TYPES, QuestionStyle, QuestionType
 from graphrag.domain.models import Article, SearchHit
 from graphrag.ports.embedding import Embedder
 from graphrag.ports.llm import LLM
@@ -32,16 +32,26 @@ MAX_ATTEMPTS = 60
 
 GROUP_SIZE: Mapping[str, int] = {"factual": 1, "comparative": 2, "relational": 3, "evolutive": 3}
 
-SYSTEM_PROMPT = """\
-You write evaluation questions for a search system over scientific articles (AI and RAG).
-You are given numbered articles (title, date, abstract). Write ONE question and its expected answer.
-Rules:
+_NAMED_RULES = """\
 - The question must be self-contained and NAME what it asks about: use the exact names of the
   systems, methods, datasets or topics, as written in the titles and abstracts.
 - Never use vague references such as "these works", "the two approaches", "the first article",
   "the paper" or "both systems": a reader who has not seen the articles must know what is meant.
 - It must need the content of ALL the given articles, and be answerable from them alone.
-- Do not copy long phrases from the abstracts; keep the proper names.
+- Do not copy long phrases from the abstracts; keep the proper names."""
+
+_DESCRIPTIVE_RULES = """\
+- The question must be self-contained and DESCRIBE what it asks about the way a reader who has
+  never seen these articles would: the problem, the mechanism or the setting, in your own words.
+- Do NOT use the name of any system, method or framework introduced by the articles, and do not
+  reuse the distinctive words of their titles. Well-known public datasets and benchmarks may
+  be named.
+- Never use vague references such as "these works", "the two approaches", "the first article",
+  "the paper" or "both systems": say what is meant by describing it.
+- It must need the content of ALL the given articles, and be answerable from them alone.
+- Do not copy long phrases from the abstracts."""
+
+_COMMON_RULES = """\
 - The expected answer is 2 to 4 sentences, using only facts stated in the abstracts. If it
   links the articles in a way the abstracts do not state, it says so ("the abstracts do not
   say..."). If it quotes figures from different articles, it says whether they measure the
@@ -50,6 +60,24 @@ Rules:
 - If the articles share no specific subject that one precise question could be about, do not
   force a link: reply {"skip": "<one sentence saying why>"} instead.
 Reply with a JSON object only: {"question": ..., "expected_answer": ...} or {"skip": ...}."""
+
+
+def _system_prompt(rules: str) -> str:
+    return (
+        "You write evaluation questions for a search system over scientific articles "
+        "(AI and RAG).\n"
+        "You are given numbered articles (title, date, abstract). "
+        "Write ONE question and its expected answer.\n"
+        f"Rules:\n{rules}\n{_COMMON_RULES}"
+    )
+
+
+SYSTEM_PROMPT = _system_prompt(_NAMED_RULES)
+DESCRIPTIVE_SYSTEM_PROMPT = _system_prompt(_DESCRIPTIVE_RULES)
+SYSTEM_PROMPTS: Mapping[str, str] = {
+    "named": SYSTEM_PROMPT,
+    "descriptive": DESCRIPTIVE_SYSTEM_PROMPT,
+}
 
 TYPE_INSTRUCTIONS: Mapping[str, str] = {
     "factual": "Ask a precise factual question about the method, result or setting of the article.",
@@ -72,6 +100,7 @@ TYPE_INSTRUCTIONS: Mapping[str, str] = {
 class QuestionPlan:
     type: QuestionType
     articles: tuple[Article, ...]  # the seed first, except for "evolutive" (oldest first)
+    style: QuestionStyle = "named"
 
 
 def normalized_title(article: Article) -> str:
@@ -118,6 +147,7 @@ def plan_questions(
     exclude: Collection[str] = (),
     min_words: int = MIN_WORDS,
     min_span_days: int = MIN_SPAN_DAYS,
+    style: QuestionStyle = "named",
 ) -> list[QuestionPlan]:
     """Choose `per_type` groups of articles for each of `types`, never reusing an article.
 
@@ -157,7 +187,7 @@ def plan_questions(
                 if group is not None:
                     for article in group:
                         used.update(same_title[normalized_title(article)])
-                    plans.append(QuestionPlan(kind, group))
+                    plans.append(QuestionPlan(kind, group, style))
                     break
             else:
                 raise RuntimeError(f"could not find a group of articles for a {kind} question")
@@ -259,21 +289,98 @@ def find_vague_wording(question: str) -> str | None:
     return match.group(0) if match else None
 
 
-def write_question(plan: QuestionPlan, llm: LLM) -> tuple[str, str]:
-    """Ask the model, and once more if the question is vague. Raises ValueError on failure."""
+MAX_LEAK_FREQUENCY = 3  # a title word found in at most this many titles identifies its article
+
+_WORD = re.compile(r"[a-z0-9]+")
+_STOP_WORDS = frozenset(
+    re.findall(
+        r"\w+",
+        """a an and are as at be by can do does for from has have how in into is it its more most
+        of on or over that the their this to under using via was were what when which who why with
+        within without than then them these those through""",
+    )
+)
+
+
+def content_words(text: str) -> set[str]:
+    """Lower-case words of at least 3 characters, without the most common function words."""
+    return {w for w in _WORD.findall(text.lower()) if len(w) >= 3 and w not in _STOP_WORDS}
+
+
+def title_word_frequencies(articles: Sequence[Article]) -> Counter[str]:
+    """For each word, the number of distinct titles that contain it."""
+    distinct = {normalized_title(a) for a in articles}
+    return Counter(word for title in distinct for word in content_words(title))
+
+
+def find_title_leak(
+    question: str,
+    titles: Sequence[str],
+    frequencies: Mapping[str, int],
+    max_frequency: int = MAX_LEAK_FREQUENCY,
+) -> str | None:
+    """A rare word of the expected articles' titles that the question repeats, or None.
+
+    A word found in at most `max_frequency` titles (a system name such as "ARIA") lets the
+    keyword search jump straight to the article, so a descriptive question must not use it.
+    """
+    title_words = set().union(*(content_words(t) for t in titles)) if titles else set()
+    leaked = sorted(
+        word
+        for word in content_words(question) & title_words
+        if frequencies.get(word, 0) <= max_frequency
+    )
+    return leaked[0] if leaked else None
+
+
+def title_overlap(question: str, titles: Sequence[str]) -> float:
+    """Share of the question's content words that also appear in the expected titles."""
+    words = content_words(question)
+    if not words:
+        return 0.0
+    title_words = set().union(*(content_words(t) for t in titles)) if titles else set()
+    return round(len(words & title_words) / len(words), 3)
+
+
+def write_question(
+    plan: QuestionPlan, llm: LLM, frequencies: Mapping[str, int] | None = None
+) -> tuple[str, str]:
+    """Ask the model, and once more if the question is vague (or, if descriptive, leaks a name).
+
+    A descriptive plan needs the title word `frequencies`. Raises ValueError on failure.
+    """
+    if plan.style == "descriptive" and frequencies is None:
+        raise ValueError("a descriptive question needs the title word frequencies to be checked")
+    system = SYSTEM_PROMPTS[plan.style]
+    titles = [a.title for a in plan.articles]
     prompt = build_prompt(plan)
     attempt_prompt = prompt
-    vague: str | None = None
+    problem = ""
     for _ in range(MAX_REWRITES + 1):
-        question, answer = parse_generation(llm.complete(SYSTEM_PROMPT, attempt_prompt).text)
+        question, answer = parse_generation(llm.complete(system, attempt_prompt).text)
         vague = find_vague_wording(question)
-        if vague is None:
-            return question, answer
-        attempt_prompt = (
-            f"{prompt}\n\nYour previous question was rejected: it says {vague!r}, which does not "
-            "say what it is about. Rewrite it naming the specific systems, methods or topics."
+        leak = (
+            find_title_leak(question, titles, frequencies)
+            if plan.style == "descriptive" and frequencies is not None
+            else None
         )
-    raise ValueError(f"still vague after a rewrite: {vague!r}")
+        if vague is not None:
+            problem = f"still vague after a rewrite: {vague!r}"
+            advice = f"it says {vague!r}, which does not say what it is about. Rewrite it " + (
+                "describing the specific problem or mechanism."
+                if plan.style == "descriptive"
+                else "naming the specific systems, methods or topics."
+            )
+        elif leak is not None:
+            problem = f"still names the article after a rewrite: {leak!r}"
+            advice = (
+                f"it uses {leak!r}, a distinctive word of an article title. Rewrite it "
+                "describing the idea without that word or any name of the systems."
+            )
+        else:
+            return question, answer
+        attempt_prompt = f"{prompt}\n\nYour previous question was rejected: {advice}"
+    raise ValueError(problem)
 
 
 def generate_candidates(
@@ -283,6 +390,7 @@ def generate_candidates(
     *,
     first_index: int = 1,
     log: Callable[[str], None] = print,
+    frequencies: Mapping[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """One LLM call per plan. Returns the candidate records and a message per failed plan."""
     records: list[dict[str, Any]] = []
@@ -291,7 +399,7 @@ def generate_candidates(
     for plan in plans:
         label = f"{plan.type} on {', '.join(a.arxiv_id for a in plan.articles)}"
         try:
-            question, answer = write_question(plan, llm)
+            question, answer = write_question(plan, llm, frequencies)
         except ValueError as exc:
             failures.append(f"{label}: {exc}")
             log(f"failed: {label}: {exc}")
@@ -303,6 +411,7 @@ def generate_candidates(
             {
                 "id": f"{plan.type}-{number:02d}",
                 "type": plan.type,
+                "style": plan.style,
                 "question": question,
                 "expected_answer": answer,
                 "expected_articles": ids,
@@ -312,6 +421,8 @@ def generate_candidates(
                     if (others := [i for i in same_title[normalized_title(a)] if i != a.arxiv_id])
                 },
                 "validated": False,
+                # computed on the generated text: stale if you rewrite the question by hand
+                "title_overlap": title_overlap(question, [a.title for a in plan.articles]),
                 "source_titles": [a.title for a in plan.articles],
                 "source_dates": [a.published.isoformat() for a in plan.articles],
             }

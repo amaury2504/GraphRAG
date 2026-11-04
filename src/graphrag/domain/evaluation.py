@@ -11,6 +11,11 @@ from graphrag.domain.identifiers import normalize_arxiv_id
 QuestionType = Literal["factual", "relational", "comparative", "evolutive"]
 QUESTION_TYPES: tuple[QuestionType, ...] = get_args(QuestionType)
 
+# "named" questions use the names of the systems (easy for keyword search); "descriptive"
+# ones describe the problem the way a reader who has not seen the article would.
+QuestionStyle = Literal["named", "descriptive"]
+QUESTION_STYLES: tuple[QuestionStyle, ...] = get_args(QuestionStyle)
+
 
 @dataclass(frozen=True, slots=True)
 class EvalQuestion:
@@ -27,6 +32,7 @@ class EvalQuestion:
     expected_articles: tuple[str, ...]
     equivalents: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     validated: bool = False
+    style: QuestionStyle = "named"
 
     @property
     def groups(self) -> list[frozenset[str]]:
@@ -62,6 +68,9 @@ def parse_question(data: Mapping[str, Any]) -> EvalQuestion:
     validated = data.get("validated", False)
     if not isinstance(validated, bool):
         raise ValueError(f"{qid}: validated must be true or false")
+    style = data.get("style", "named")
+    if style not in QUESTION_STYLES:
+        raise ValueError(f"{qid}: style must be one of {QUESTION_STYLES}, got {style!r}")
     return EvalQuestion(
         id=qid,
         type=kind,
@@ -70,6 +79,7 @@ def parse_question(data: Mapping[str, Any]) -> EvalQuestion:
         expected_articles=articles,
         equivalents=equivalents,
         validated=validated,
+        style=style,
     )
 
 

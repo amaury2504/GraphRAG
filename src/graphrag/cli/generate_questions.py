@@ -20,11 +20,12 @@ from graphrag.adapters.question_file import (
 )
 from graphrag.adapters.sentence_transformer import load_default_embedder
 from graphrag.cli.ingest import log_line
-from graphrag.domain.evaluation import QUESTION_TYPES, EvalQuestion
+from graphrag.domain.evaluation import QUESTION_STYLES, QUESTION_TYPES, EvalQuestion
 from graphrag.pipeline.question_generation import (
     generate_candidates,
     plan_questions,
     title_groups,
+    title_word_frequencies,
 )
 from graphrag.pipeline.usage import MeteredLLM, UsageMeter
 from graphrag.settings import Settings
@@ -72,6 +73,13 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=list(QUESTION_TYPES),
         help="question types to generate (default: all four)",
     )
+    parser.add_argument(
+        "--style",
+        choices=QUESTION_STYLES,
+        default="named",
+        help="named: questions use the system names; descriptive: they must not "
+        "(checked against rare title words)",
+    )
     parser.add_argument("--output", type=Path, default=CANDIDATES_PATH)
     parser.add_argument(
         "--exclude-questions",
@@ -115,6 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
             types=args.types,
             exclude=exclude,
+            style=args.style,
         )
     for plan in plans:
         log_line(
@@ -125,7 +134,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     llm = MeteredLLM(MistralLLM(mistral_client(key), model=settings.mistral_model), meter)
     records, failures = generate_candidates(
-        plans, llm, title_groups(articles), first_index=args.first_index, log=log_line
+        plans,
+        llm,
+        title_groups(articles),
+        first_index=args.first_index,
+        log=log_line,
+        frequencies=title_word_frequencies(articles),
     )
     write_records(args.output, records)
     print(
