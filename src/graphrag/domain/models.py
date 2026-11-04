@@ -43,6 +43,7 @@ class SearchHit:
     position: int
     text: str
     score: float
+    abstract: str = ""  # the whole abstract of the article; `text` is only the matching chunk
 
 
 @dataclass(frozen=True, slots=True)

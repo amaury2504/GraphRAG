@@ -111,7 +111,7 @@ VECTOR_SEARCH = """
 CALL db.index.vector.queryNodes($index, $k, $vector) YIELD node, score
 MATCH (node)-[:PART_OF]->(a:Article)
 RETURN a.arxiv_id AS arxiv_id, a.title AS title, node.position AS position,
-       node.text AS text, score
+       node.text AS text, a.abstract AS abstract, score
 ORDER BY score DESC
 """
 
@@ -119,7 +119,7 @@ KEYWORD_SEARCH = """
 CALL db.index.fulltext.queryNodes($index, $lucene) YIELD node, score
 MATCH (node)-[:PART_OF]->(a:Article)
 RETURN a.arxiv_id AS arxiv_id, a.title AS title, node.position AS position,
-       node.text AS text, score
+       node.text AS text, a.abstract AS abstract, score
 ORDER BY score DESC
 LIMIT $k
 """
@@ -145,6 +145,7 @@ def _hit(record: Any) -> SearchHit:
         position=record["position"],
         text=record["text"],
         score=float(record["score"]),
+        abstract=record["abstract"] or "",
     )
 
 

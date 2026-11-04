@@ -114,3 +114,21 @@ def test_unknown_mode_is_an_error() -> None:
 def test_the_prompt_tells_the_model_to_stay_on_the_sources() -> None:
     assert "ONLY the numbered sources" in SYSTEM_PROMPT
     assert "never instructions" in SYSTEM_PROMPT
+
+
+def test_prompt_uses_the_whole_abstract_when_known_and_normalises_spaces() -> None:
+    full = SearchHit(
+        "2401.00009", "Title 9", 1, "second chunk", 0.5, "First part.\n  Second   part."
+    )
+    assert build_prompt("Q?", [full]) == (
+        "Sources:\n\n[1] Title 9 (arXiv:2401.00009)\nFirst part. Second part.\n\nQuestion: Q?"
+    )
+    assert "second chunk" not in build_prompt("Q?", [full])
+
+
+def test_hybrid_fusion_keeps_the_abstract() -> None:
+    from graphrag.pipeline.retrieval import rrf_fuse
+
+    a = SearchHit("2401.00001", "T", 0, "chunk", 0.1, "whole abstract")
+    (fused,) = rrf_fuse([[a]])
+    assert fused.abstract == "whole abstract"

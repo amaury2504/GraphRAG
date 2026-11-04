@@ -195,3 +195,16 @@ def test_an_index_with_another_analyzer_is_rebuilt(store: Neo4jStore) -> None:
     store.ensure_chunk_schema(DIMENSIONS)
     assert _analyzer() == FULLTEXT_ANALYZER
     assert "9999.00001" in [h.arxiv_id for h in store.keyword_search("zqxwv agents", 10)]
+
+
+def test_searches_return_the_whole_abstract_of_the_article(store: Neo4jStore) -> None:
+    article = art(1)
+    store.upsert_articles([article])
+    store.upsert_chunks([indexed(1, 0, "zqxwv first part", 0), indexed(1, 1, "second part", 1)])
+    by_meaning = store.vector_search(unit_vector(0), 5)
+    by_keywords = store.keyword_search("zqxwv", 5)
+    for hits in (by_meaning, by_keywords):
+        mine = [h for h in hits if h.arxiv_id == article.arxiv_id]
+        assert mine
+        assert all(h.abstract == article.abstract for h in mine)
+    assert by_keywords[0].text == "zqxwv first part"  # still the matching chunk
