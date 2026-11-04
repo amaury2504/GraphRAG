@@ -27,11 +27,13 @@ from graphrag.settings import Settings
 MAX_WITHOUT_CONFIRMATION = 8  # questions: the user fixes the size of the first batch
 
 
-def check_request(per_type: int, confirm_cost: bool, output: Path, force: bool) -> str | None:
+def check_request(
+    per_type: int, type_count: int, confirm_cost: bool, output: Path, force: bool
+) -> str | None:
     """Return the reason this run must not start, or None."""
     if per_type < 1:
         return "--per-type must be at least 1"
-    total = per_type * len(QUESTION_TYPES)
+    total = per_type * type_count
     if total > MAX_WITHOUT_CONFIRMATION and not confirm_cost:
         return (
             f"{total} questions means {total} LLM calls; more than {MAX_WITHOUT_CONFIRMATION} "
@@ -49,6 +51,13 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--first-index", type=int, default=1, help="number of the first id per type"
     )
+    parser.add_argument(
+        "--types",
+        nargs="+",
+        choices=QUESTION_TYPES,
+        default=list(QUESTION_TYPES),
+        help="question types to generate (default: all four)",
+    )
     parser.add_argument("--output", type=Path, default=CANDIDATES_PATH)
     parser.add_argument("--force", action="store_true", help="overwrite the output file")
     parser.add_argument("--confirm-cost", action="store_true")
@@ -58,7 +67,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    problem = check_request(args.per_type, args.confirm_cost, args.output, args.force)
+    problem = check_request(
+        args.per_type, len(args.types), args.confirm_cost, args.output, args.force
+    )
     if problem:
         print(problem)
         return 2
@@ -73,7 +84,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     ) as store:
         articles = store.all_articles()
-        plans = plan_questions(articles, store, embedder, per_type=args.per_type, seed=args.seed)
+        plans = plan_questions(
+            articles, store, embedder, per_type=args.per_type, seed=args.seed, types=args.types
+        )
     for plan in plans:
         log_line(
             f"{plan.type}: " + " | ".join(f"{a.arxiv_id} {a.title[:50]}" for a in plan.articles)
