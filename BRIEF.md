@@ -8,7 +8,7 @@
 | --- | --- |
 | 1. Socle (structure, Docker Compose, CI) | **Terminée**, CI verte |
 | 2. Ingestion (arXiv, auteurs, citations → Neo4j) | **Terminée**, corpus complet ingéré le 2026-11-04. |
-| 3. RAG de base | **En cours** : découpage, embeddings bge-small, nœuds `Chunk` + index vectoriel et texte intégral faits, corpus indexé (3 879 morceaux). Reste : recherche hybride (RRF), réponse Mistral, `/ask`. |
+| 3. RAG de base | **Code terminé, en attente de validation** : découpage, embeddings bge-small, corpus indexé (3 879 morceaux), recherche `vector` et `hybrid` (RRF), réponse Mistral avec citations vérifiées, `POST /ask`. Un essai réel a été fait le 2026-11-04 (1 351 tokens). Reste : valider le critère d'acceptation de `SPEC.md` avec l'utilisateur. |
 
 État de la base locale (2026-11-04) : 2 827 articles, 10 383 auteurs, 11 203 `AUTHORED_BY`, 924 `CITES` (539 articles citent, 526 sont cités). Semantic Scholar : 2 324 articles trouvés, 3 inconnus, 93 sans référence arXiv.
 
@@ -25,7 +25,7 @@
 
 - **Version de Neo4j** : 5.26.32 LTS est en place **à titre provisoire**. Alternative : 2026.10. Vérifier dans la doc officielle le support des index vectoriels et texte intégral avant l'étape 3.
 - **Modèle d'embeddings** (et de reranking) : proposé `bge-small-en-v1.5` (local, 512 tokens) contre `all-MiniLM-L6-v2` (coupe à 256 sous-mots, trop court pour nos morceaux de 200 mots).
-- **Fournisseur de LLM** : décidé le 2026-11-04, **Mistral par l'API** (clé `MISTRAL_API_KEY` dans `.env`, offre de l'utilisateur dans Mistral Studio). Test du 2026-11-04 avec `mistral-small-latest` : 200, limites 100 requêtes/min et 100 000 tokens/min. Claude Haiku 5.5 reste l'option de secours (environ 0,50 $ pour la V1). Choix du modèle Mistral exact et budget encore à fixer.
+- **Fournisseur de LLM** : décidé le 2026-11-04, **Mistral par l'API** (clé `MISTRAL_API_KEY` dans `.env`). Modèle `mistral-small-latest` (réglable par `MISTRAL_MODEL`), limites vues : 100 requêtes/min et 100 000 tokens/min. Budget : compteur qui alerte une fois (`TOKEN_ALERT`, 500 000 par défaut) sans jamais bloquer. Claude Haiku 5.5 reste l'option de secours. Pas de LangChain pour l'instant : appel direct en `httpx`.
 - **Fusion de la recherche hybride** : décidé le 2026-11-03, option A (Reciprocal Rank Fusion, `1/(60 + rang)`, fusion en Python dans `pipeline/`). **Option B à essayer après l'étape 4** : somme pondérée de scores normalisés (min-max, poids à régler sur le jeu de test), si le jeu de test montre un écart.
 - Normalisation des noms de méthodes/benchmarks (avant l'étape 6), taille du lot d'extraction, nombre de testeurs, seuils de latence et de coût.
 - Licence du dépôt (aucun fichier `LICENSE` pour l'instant).
