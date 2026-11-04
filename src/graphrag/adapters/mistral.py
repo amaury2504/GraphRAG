@@ -7,10 +7,14 @@ from typing import Any
 import httpx
 
 from graphrag.adapters.http import send_with_retry
+from graphrag.adapters.token_limiter import TokenRateLimiter
 from graphrag.domain.models import Completion, Usage
 
 API_URL = "https://api.mistral.ai/v1/chat/completions"
 DEFAULT_MODEL = "mistral-small-latest"
+# The free tier allows 100 000 tokens a minute; stay under it with some margin.
+DEFAULT_TOKENS_PER_MINUTE = 80_000
+CHARS_PER_TOKEN = 3  # pessimistic for English; the real usage replaces the estimate afterwards
 
 
 def mistral_client(
@@ -34,6 +38,8 @@ class MistralLLM:
         retry_delay: float = 2.0,
         max_delay: float = 30.0,
         sleep: Callable[[float], None] = time.sleep,
+        tokens_per_minute: int | None = DEFAULT_TOKENS_PER_MINUTE,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._model = model
@@ -43,8 +49,17 @@ class MistralLLM:
         self._retry_delay = retry_delay
         self._max_delay = max_delay
         self._sleep = sleep
+        self._limiter = (
+            None
+            if tokens_per_minute is None
+            else TokenRateLimiter(tokens_per_minute, clock=clock, sleep=sleep)
+        )
 
     def complete(self, system: str, user: str) -> Completion:
+        reservation = None
+        if self._limiter is not None:
+            estimate = (len(system) + len(user)) // CHARS_PER_TOKEN + self._max_tokens
+            reservation = self._limiter.acquire(estimate)
         response = send_with_retry(
             self._client,
             "POST",
@@ -64,7 +79,10 @@ class MistralLLM:
             max_delay=self._max_delay,
             sleep=self._sleep,
         )
-        return parse_completion(response.json())
+        completion = parse_completion(response.json())
+        if self._limiter is not None and reservation is not None:
+            self._limiter.settle(reservation, completion.usage.total_tokens)
+        return completion
 
 
 def parse_completion(payload: Any) -> Completion:

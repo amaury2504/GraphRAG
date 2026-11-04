@@ -105,3 +105,38 @@ def test_client_errors_are_not_retried() -> None:
 def test_unexpected_payloads_are_rejected(payload: Any) -> None:
     with pytest.raises(ValueError, match="language model"):
         parse_completion(payload)
+
+
+def _big_ok(total: int) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": total - 1, "completion_tokens": 1, "total_tokens": total},
+        },
+    )
+
+
+def test_calls_are_spread_to_stay_under_the_token_quota() -> None:
+    now = [0.0]
+    env = Env([_big_ok(900), _big_ok(900)])
+
+    def sleep(seconds: float) -> None:
+        env.sleeps.append(seconds)
+        now[0] += seconds
+
+    client = mistral_client(KEY, transport=httpx.MockTransport(env.handler))
+    llm = MistralLLM(
+        client, max_tokens=200, tokens_per_minute=1000, sleep=sleep, clock=lambda: now[0]
+    )
+    llm.complete("s", "u")  # real usage 900 replaces the small estimate
+    llm.complete("s", "u")  # 900 + estimate would exceed 1000: wait for the window
+    assert env.sleeps == [60.0]
+
+
+def test_the_limiter_can_be_turned_off() -> None:
+    env = Env([_big_ok(900), _big_ok(900)])
+    llm = env.llm(tokens_per_minute=None)
+    llm.complete("s", "u")
+    llm.complete("s", "u")
+    assert env.sleeps == []
