@@ -25,8 +25,8 @@ from tests.integration.test_neo4j_store import URI, USER, _cleanup, _password
 pytestmark = pytest.mark.integration
 
 DIMENSIONS = 384
-FIRST_PART = (
-    "Quarkfilter uses a learned gate to skip needless lookups. " + "Filler sentence here. " * 70
+FIRST_PART = "Quarkfilter uses a learned gate to skip needless lookups. " + "".join(
+    f"Filler{i} sentence{i} here{i}. " for i in range(70)
 )
 SECOND_PART = "Results show a tenfold speedup on the zebrabench suite."
 
