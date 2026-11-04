@@ -14,3 +14,6 @@ class Settings(BaseSettings):
     mistral_model: str = "mistral-small-latest"
     # A warning is logged once the language model has used more tokens than this.
     token_alert: int = 500_000
+    # Load the embedding model and the language model client at startup instead of on the
+    # first question (the first /ask is then fast, the start is slower).
+    preload_models: bool = False

@@ -23,6 +23,8 @@ class NotConfiguredError(Exception):
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
     services: dict[str, Literal["ok", "down"]]
+    # Ingested articles that cannot be found yet: run graphrag.cli.index. None if unknown.
+    unindexed_articles: int | None = None
 
 
 class AskRequest(BaseModel):
@@ -93,6 +95,7 @@ class AskResponse(BaseModel):
 def create_app(
     probes: Sequence[HealthProbe],
     answerer: Callable[[], QuestionAnswerer] | None = None,
+    unindexed: Callable[[], int] | None = None,
 ) -> FastAPI:
     """`answerer` is called on each /ask; it may build its parts lazily (model loading is slow)."""
     app = FastAPI(title="GraphRAG")
@@ -109,7 +112,15 @@ def create_app(
         healthy = all(state == "ok" for state in services.values())
         if not healthy:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        return HealthResponse(status="ok" if healthy else "degraded", services=services)
+        missing: int | None = None
+        if unindexed is not None and services.get("neo4j") == "ok":
+            try:
+                missing = unindexed()
+            except Exception:
+                missing = None  # informative only: never makes /health fail
+        return HealthResponse(
+            status="ok" if healthy else "degraded", services=services, unindexed_articles=missing
+        )
 
     @app.post("/ask", response_model=AskResponse)
     def ask(request: AskRequest) -> AskResponse:
@@ -176,16 +187,31 @@ def build_answerer(settings: Settings) -> QuestionAnswerer:
     )
 
 
+def preload(answerer: Callable[[], QuestionAnswerer]) -> None:
+    """Build the answerer in a background thread so the server starts at once.
+
+    Failures (no key, index mismatch) are only logged: /ask reports them to its caller.
+    """
+
+    def build() -> None:
+        try:
+            answerer()
+        except Exception:
+            logger.exception("preloading the models failed")
+
+    threading.Thread(target=build, name="preload-models", daemon=True).start()
+
+
 def create_default_app() -> FastAPI:
     settings = Settings()  # type: ignore[call-arg]  # values come from the environment
+    neo4j_probe = Neo4jProbe(
+        settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
+    )
+    answerer = LazyAnswerer(lambda: build_answerer(settings))
+    if settings.preload_models:
+        preload(answerer)
     return create_app(
-        [
-            Neo4jProbe(
-                settings.neo4j_uri,
-                settings.neo4j_user,
-                settings.neo4j_password.get_secret_value(),
-            ),
-            PostgresProbe(settings.postgres_dsn.get_secret_value()),
-        ],
-        LazyAnswerer(lambda: build_answerer(settings)),
+        [neo4j_probe, PostgresProbe(settings.postgres_dsn.get_secret_value())],
+        answerer,
+        neo4j_probe.unindexed_articles,
     )

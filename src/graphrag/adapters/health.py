@@ -13,6 +13,15 @@ class Neo4jProbe:
         with neo4j.GraphDatabase.driver(self._uri, auth=self._auth) as driver:
             driver.verify_connectivity()
 
+    def unindexed_articles(self) -> int:
+        """Articles without chunks: ingested but not searchable until `cli.index` runs."""
+        query = (
+            "MATCH (a:Article) WHERE NOT EXISTS { (:Chunk)-[:PART_OF]->(a) } RETURN count(a) AS n"
+        )
+        with neo4j.GraphDatabase.driver(self._uri, auth=self._auth) as driver:
+            records, _, _ = driver.execute_query(query)
+        return int(records[0]["n"])
+
 
 class PostgresProbe:
     name = "postgres"

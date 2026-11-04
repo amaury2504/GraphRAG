@@ -40,6 +40,9 @@ services:
       MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
       MISTRAL_MODEL: ${MISTRAL_MODEL:-mistral-small-latest}
       TOKEN_ALERT: ${TOKEN_ALERT:-500000}
+      PRELOAD_MODELS: ${PRELOAD_MODELS:-false}
+      # Set to 1 once the model is in the hf_cache volume: no more calls to Hugging Face.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
     volumes:
       - hf_cache:/root/.cache/huggingface # the embedding model is downloaded once
     ports:

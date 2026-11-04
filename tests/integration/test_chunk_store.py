@@ -247,3 +247,14 @@ def test_another_model_with_the_same_dimensions_is_refused(clean_info: Neo4jStor
 def test_checking_without_a_recorded_fingerprint_fails(clean_info: Neo4jStore) -> None:
     with pytest.raises(ValueError, match="no index fingerprint"):
         clean_info.check_index_info(INFO)
+
+
+def test_the_probe_counts_articles_without_chunks(store: Neo4jStore) -> None:
+    from graphrag.adapters.health import Neo4jProbe
+
+    probe = Neo4jProbe(URI, USER, _password())
+    before = probe.unindexed_articles()
+    store.upsert_articles([art(1), art(2)])
+    assert probe.unindexed_articles() == before + 2
+    store.upsert_chunks([indexed(1, 0, "some text", 0)])
+    assert probe.unindexed_articles() == before + 1

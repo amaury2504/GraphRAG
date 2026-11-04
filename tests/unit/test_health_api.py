@@ -23,7 +23,11 @@ def client_for(*probes: FakeProbe) -> TestClient:
 def test_all_services_up_returns_200_ok() -> None:
     response = client_for(FakeProbe("neo4j"), FakeProbe("postgres")).get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "services": {"neo4j": "ok", "postgres": "ok"}}
+    assert response.json() == {
+        "status": "ok",
+        "services": {"neo4j": "ok", "postgres": "ok"},
+        "unindexed_articles": None,
+    }
 
 
 @pytest.mark.parametrize("down", ["neo4j", "postgres"])
@@ -65,8 +69,41 @@ def test_every_probe_is_checked_on_each_call() -> None:
 def test_no_probes_reports_ok() -> None:
     response = TestClient(create_app([])).get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "services": {}}
+    assert response.json() == {"status": "ok", "services": {}, "unindexed_articles": None}
 
 
 def test_unknown_route_is_404() -> None:
     assert client_for().get("/nope").status_code == 404
+
+
+def test_health_reports_unindexed_articles_when_neo4j_is_up() -> None:
+    app = create_app([FakeProbe("neo4j")], unindexed=lambda: 7)
+    body = TestClient(app).get("/health").json()
+    assert body["unindexed_articles"] == 7
+    assert body["status"] == "ok"
+
+
+def test_unindexed_count_is_not_asked_when_neo4j_is_down() -> None:
+    calls: list[int] = []
+
+    def count() -> int:
+        calls.append(1)
+        return 1
+
+    app = create_app([FakeProbe("neo4j", ConnectionError("x"))], unindexed=count)
+    response = TestClient(app).get("/health")
+    assert response.json()["unindexed_articles"] is None
+    assert calls == []
+
+
+def test_a_failing_unindexed_count_never_breaks_health() -> None:
+    def broken() -> int:
+        raise RuntimeError("boom")
+
+    response = TestClient(create_app([FakeProbe("neo4j")], unindexed=broken)).get("/health")
+    assert response.status_code == 200
+    assert response.json()["unindexed_articles"] is None
+
+
+def test_unindexed_is_none_when_not_wired() -> None:
+    assert client_for(FakeProbe("neo4j")).get("/health").json()["unindexed_articles"] is None

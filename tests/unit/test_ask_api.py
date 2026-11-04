@@ -165,3 +165,18 @@ def test_build_answerer_needs_a_key(key: SecretStr | None) -> None:
 def test_answer_is_a_plain_value() -> None:
     answer = Answer("q", "t", (), (), Usage())
     assert answer.usage.total_tokens == 0
+
+
+def test_preload_builds_the_answerer_in_the_background_and_swallows_failures() -> None:
+    import threading
+
+    from graphrag.api.app import preload
+
+    built = threading.Event()
+
+    def build() -> QuestionAnswerer:
+        built.set()
+        raise NotConfiguredError("no key")
+
+    preload(build)
+    assert built.wait(5)
