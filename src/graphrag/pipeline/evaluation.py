@@ -12,6 +12,7 @@ from graphrag.domain.evaluation import (
     QUESTION_TYPES,
     EvalQuestion,
     Summary,
+    ndcg_at_k,
     recall_at_k,
     reciprocal_rank,
     summarize,
@@ -19,6 +20,7 @@ from graphrag.domain.evaluation import (
 from graphrag.ports.retrieval import Retriever
 
 DEFAULT_KS = (1, 3, 5, 10)
+NDCG_K = 10
 ALL = "all"
 
 
@@ -29,6 +31,7 @@ class QuestionResult:
     retrieved: tuple[str, ...]  # arXiv ids, best first
     recall: Mapping[int, float]  # k -> recall@k
     reciprocal_rank: float
+    ndcg: float  # graded nDCG@NDCG_K, counting `also_relevant` articles
     seconds: float
     style: str = "named"
 
@@ -38,6 +41,7 @@ class GroupSummary:
     n: int
     recall: Mapping[int, Summary]
     mrr: Summary
+    ndcg: Summary
     mean_seconds: float
 
 
@@ -47,10 +51,14 @@ def evaluate_retrieval(
     ks: Sequence[int] = DEFAULT_KS,
     clock: Callable[[], float] = time.perf_counter,
 ) -> dict[str, list[QuestionResult]]:
-    """Ask every question to every retriever, fetching max(ks) articles each time."""
+    """Ask every answerable question to every retriever, fetching enough articles each time.
+
+    Unanswerable questions have no expected article, so no retrieval metric applies to them.
+    """
     if not ks or min(ks) < 1:
         raise ValueError("ks must be positive integers")
-    depth = max(ks)
+    depth = max(max(ks), NDCG_K)
+    questions = [q for q in questions if q.answerable]
     results: dict[str, list[QuestionResult]] = {}
     for name, retriever in retrievers.items():
         per_question = []
@@ -60,6 +68,7 @@ def evaluate_retrieval(
             seconds = clock() - start
             retrieved = tuple(hit.arxiv_id for hit in hits)
             groups = question.groups
+            relevant = set(question.also_relevant)
             per_question.append(
                 QuestionResult(
                     question_id=question.id,
@@ -67,6 +76,7 @@ def evaluate_retrieval(
                     retrieved=retrieved,
                     recall={k: recall_at_k(groups, retrieved, k) for k in ks},
                     reciprocal_rank=reciprocal_rank(groups, retrieved),
+                    ndcg=ndcg_at_k(groups, relevant, retrieved, NDCG_K),
                     seconds=seconds,
                     style=question.style,
                 )
@@ -80,6 +90,7 @@ def _group(results: Sequence[QuestionResult], ks: Sequence[int]) -> GroupSummary
         n=len(results),
         recall={k: summarize([r.recall[k] for r in results]) for k in ks},
         mrr=summarize([r.reciprocal_rank for r in results]),
+        ndcg=summarize([r.ndcg for r in results]),
         mean_seconds=sum(r.seconds for r in results) / len(results) if results else 0.0,
     )
 
@@ -132,7 +143,10 @@ def paired_differences(
     groups.update(_style_groups(list(zip(baseline, other, strict=True)), lambda p: p[0].style))
     differences: dict[str, dict[str, Summary]] = {}
     for name, pairs in groups.items():
-        metrics = {"mrr": summarize([b.reciprocal_rank - a.reciprocal_rank for a, b in pairs])}
+        metrics = {
+            "mrr": summarize([b.reciprocal_rank - a.reciprocal_rank for a, b in pairs]),
+            f"ndcg@{NDCG_K}": summarize([b.ndcg - a.ndcg for a, b in pairs]),
+        }
         for k in ks:
             metrics[f"recall@{k}"] = summarize([b.recall[k] - a.recall[k] for a, b in pairs])
         differences[name] = metrics

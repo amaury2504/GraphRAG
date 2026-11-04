@@ -1,8 +1,9 @@
 """Evaluation questions and retrieval metrics (recall@k, MRR) with bootstrap intervals."""
 
+import math
 import random
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
@@ -23,6 +24,12 @@ class EvalQuestion:
 
     `equivalents` maps an expected article to other arXiv ids of the same work (a paper
     deposited twice): finding any of them counts as finding the article.
+
+    The corpus only talks about RAG, so other articles than the expected ones can answer too.
+    `also_relevant` lists those a person judged relevant when pooling (they count in nDCG, with
+    a lower grade, and never in recall or MRR); `judged_not_relevant` lists those judged not
+    relevant, so a later pooling does not ask again. An `answerable=False` question has no
+    expected article: it checks that the system says it cannot answer.
     """
 
     id: str
@@ -33,6 +40,9 @@ class EvalQuestion:
     equivalents: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     validated: bool = False
     style: QuestionStyle = "named"
+    also_relevant: tuple[str, ...] = ()
+    judged_not_relevant: tuple[str, ...] = ()
+    answerable: bool = True
 
     @property
     def groups(self) -> list[frozenset[str]]:
@@ -49,12 +59,18 @@ def parse_question(data: Mapping[str, Any]) -> EvalQuestion:
     kind = _text(data, "type")
     if kind not in QUESTION_TYPES:
         raise ValueError(f"{qid}: type must be one of {QUESTION_TYPES}, got {kind!r}")
-    articles = _ids(qid, data.get("expected_articles"), "expected_articles")
-    if not articles:
+    answerable = data.get("answerable", True)
+    if not isinstance(answerable, bool):
+        raise ValueError(f"{qid}: answerable must be true or false")
+    articles = _ids(qid, data.get("expected_articles", []), "expected_articles")
+    if not answerable:
+        if articles:
+            raise ValueError(f"{qid}: an unanswerable question has no expected_articles")
+    elif not articles:
         raise ValueError(f"{qid}: expected_articles is empty")
     if len(set(articles)) != len(articles):
         raise ValueError(f"{qid}: expected_articles has duplicates")
-    if kind != "factual" and len(articles) < 2:
+    if answerable and kind != "factual" and len(articles) < 2:
         raise ValueError(f"{qid}: a {kind} question needs at least 2 expected articles")
     equivalents_raw = data.get("equivalents") or {}
     if not isinstance(equivalents_raw, Mapping):
@@ -65,6 +81,15 @@ def parse_question(data: Mapping[str, Any]) -> EvalQuestion:
         if article not in articles:
             raise ValueError(f"{qid}: equivalents for {article}, which is not an expected article")
         equivalents[article] = _ids(qid, values, "equivalents")
+    also_relevant = _ids(qid, data.get("also_relevant", []), "also_relevant")
+    not_relevant = _ids(qid, data.get("judged_not_relevant", []), "judged_not_relevant")
+    known = {*articles, *(i for ids in equivalents.values() for i in ids)}
+    if known & {*also_relevant, *not_relevant}:
+        raise ValueError(f"{qid}: an expected article cannot also be judged in also_relevant")
+    if set(also_relevant) & set(not_relevant):
+        raise ValueError(f"{qid}: an article cannot be both relevant and not relevant")
+    if not answerable and also_relevant:
+        raise ValueError(f"{qid}: an unanswerable question has no relevant article")
     validated = data.get("validated", False)
     if not isinstance(validated, bool):
         raise ValueError(f"{qid}: validated must be true or false")
@@ -80,6 +105,9 @@ def parse_question(data: Mapping[str, Any]) -> EvalQuestion:
         equivalents=equivalents,
         validated=validated,
         style=style,
+        also_relevant=also_relevant,
+        judged_not_relevant=not_relevant,
+        answerable=answerable,
     )
 
 
@@ -122,6 +150,43 @@ def reciprocal_rank(groups: Sequence[frozenset[str]], retrieved: Sequence[str]) 
         if any(article in group for group in groups):
             return 1.0 / rank
     return 0.0
+
+
+EXPECTED_GRADE = 2  # an article the question was written from
+ALSO_RELEVANT_GRADE = 1  # another article a person judged relevant
+
+
+def ndcg_at_k(
+    groups: Sequence[frozenset[str]],
+    also_relevant: Collection[str],
+    retrieved: Sequence[str],
+    k: int,
+) -> float:
+    """Graded nDCG@k: expected articles weigh 2, `also_relevant` ones 1, the rest 0.
+
+    Each expected article (with its equivalent ids) and each relevant article counts once, at
+    its first appearance. The ideal ranking puts every expected article first, then the others.
+    """
+    if not groups:
+        raise ValueError("a question needs at least one expected article")
+    seen_groups: set[int] = set()
+    seen_extra: set[str] = set()
+    dcg = 0.0
+    for rank, article in enumerate(retrieved[:k], start=1):
+        grade = 0
+        for index, group in enumerate(groups):
+            if article in group and index not in seen_groups:
+                seen_groups.add(index)
+                grade = EXPECTED_GRADE
+                break
+        else:
+            if article in also_relevant and article not in seen_extra:
+                seen_extra.add(article)
+                grade = ALSO_RELEVANT_GRADE
+        dcg += grade / math.log2(rank + 1)
+    ideal_grades = [EXPECTED_GRADE] * len(groups) + [ALSO_RELEVANT_GRADE] * len(set(also_relevant))
+    ideal = sum(g / math.log2(r + 1) for r, g in enumerate(ideal_grades[:k], start=1))
+    return dcg / ideal
 
 
 @dataclass(frozen=True, slots=True)

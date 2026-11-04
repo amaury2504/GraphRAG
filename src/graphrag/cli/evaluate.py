@@ -24,6 +24,7 @@ from graphrag.adapters.sentence_transformer import (
 from graphrag.domain.evaluation import EvalQuestion, Summary
 from graphrag.pipeline.evaluation import (
     DEFAULT_KS,
+    NDCG_K,
     GroupSummary,
     QuestionResult,
     evaluate_retrieval,
@@ -53,13 +54,15 @@ def select_questions(
 
 def format_table(name: str, summaries: Mapping[str, GroupSummary], ks: Sequence[int]) -> str:
     header = (
-        f"{'group':<12}{'n':>4}" + "".join(f"{f'R@{k}':>7}" for k in ks) + f"{'MRR':>7}{'s/q':>7}"
+        f"{'group':<12}{'n':>4}"
+        + "".join(f"{f'R@{k}':>7}" for k in ks)
+        + f"{'MRR':>7}{f'nDCG@{NDCG_K}':>9}{'s/q':>7}"
     )
     lines = [f"== {name} ==", header]
     for group, summary in summaries.items():
         row = f"{group:<12}{summary.n:>4}"
         row += "".join(f"{summary.recall[k].mean:>7.2f}" for k in ks)
-        row += f"{summary.mrr.mean:>7.2f}{summary.mean_seconds:>7.3f}"
+        row += f"{summary.mrr.mean:>7.2f}{summary.ndcg.mean:>9.2f}{summary.mean_seconds:>7.3f}"
         lines.append(row)
     return "\n".join(lines)
 
@@ -80,13 +83,14 @@ def format_differences(
     focus = f"recall@{5 if 5 in ks else max(ks)}"
     lines = [
         f"== {other} minus {baseline}: paired, 95% bootstrap interval over questions ==",
-        f"{'group':<12}{'n':>4}  {'MRR':<26}{focus:<26}",
+        f"{'group':<12}{'n':>4}  {'MRR':<26}{focus:<26}{f'ndcg@{NDCG_K}':<26}",
     ]
     for group, metrics in differences.items():
         n = sizes[group]
         mrr_cell = _interval(metrics["mrr"], n)
         focus_cell = _interval(metrics[focus], n)
-        lines.append(f"{group:<12}{n:>4}  {mrr_cell:<26}{focus_cell:<26}")
+        ndcg_cell = _interval(metrics[f"ndcg@{NDCG_K}"], n)
+        lines.append(f"{group:<12}{n:>4}  {mrr_cell:<26}{focus_cell:<26}{ndcg_cell:<26}")
     lines.append(
         "* = the interval excludes 0; otherwise the gap may be chance. "
         f"Never starred under {MIN_QUESTIONS_FOR_STAR} questions: the interval is then too narrow."
@@ -116,6 +120,7 @@ def build_report(
                     "n": s.n,
                     "recall": {str(k): _summary_json(s.recall[k]) for k in ks},
                     "mrr": _summary_json(s.mrr),
+                    f"ndcg@{NDCG_K}": _summary_json(s.ndcg),
                     "mean_seconds": s.mean_seconds,
                 }
                 for group, s in summaries.items()

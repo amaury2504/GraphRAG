@@ -1,9 +1,12 @@
+import math
+
 import pytest
 
 from graphrag.domain.evaluation import (
     QUESTION_TYPES,
     EvalQuestion,
     check_unique_ids,
+    ndcg_at_k,
     parse_question,
     recall_at_k,
     reciprocal_rank,
@@ -183,3 +186,90 @@ def test_style_defaults_to_named_and_is_validated() -> None:
     assert parse_question({**base, "style": "descriptive"}).style == "descriptive"
     with pytest.raises(ValueError, match="q1: style must be one of"):
         parse_question({**base, "style": "vague"})
+
+
+# --- graded relevance: also_relevant, answerable, nDCG --------------------------------------
+
+LOG3 = math.log2(3)
+
+
+def test_ndcg_is_one_for_the_ideal_ranking() -> None:
+    assert ndcg_at_k(groups("A", "B"), {"X"}, ["A", "B", "X"], 10) == pytest.approx(1.0)
+    assert ndcg_at_k(groups("A"), set(), ["A"], 10) == pytest.approx(1.0)
+
+
+def test_ndcg_hand_computed_with_an_also_relevant_article_ranked_before_an_expected_one() -> None:
+    # retrieved A(2) X(1) B(2): dcg = 2 + 1/log2(3) + 2/2 ; ideal 2, 2, 1: 2 + 2/log2(3) + 1/2
+    dcg = 2 + 1 / LOG3 + 1.0
+    ideal = 2 + 2 / LOG3 + 0.5
+    assert ndcg_at_k(groups("A", "B"), {"X"}, ["A", "X", "B"], 10) == pytest.approx(dcg / ideal)
+
+
+def test_ndcg_is_zero_when_nothing_relevant_is_retrieved() -> None:
+    assert ndcg_at_k(groups("A"), {"X"}, ["Y", "Z"], 10) == 0.0
+
+
+def test_ndcg_only_looks_at_the_first_k() -> None:
+    assert ndcg_at_k(groups("A"), set(), ["Y", "A"], 1) == 0.0
+    assert ndcg_at_k(groups("A"), set(), ["Y", "A"], 2) == pytest.approx(1 / LOG3)
+
+
+def test_ndcg_counts_each_article_once_and_an_equivalent_id_as_its_article() -> None:
+    twin = [frozenset({"A", "A2"})]
+    assert ndcg_at_k(twin, set(), ["A", "A2"], 10) == pytest.approx(1.0)  # second twin: no gain
+    assert ndcg_at_k(twin, set(), ["A2"], 10) == pytest.approx(1.0)
+    assert ndcg_at_k(groups("A"), {"X"}, ["X", "X", "A"], 10) == pytest.approx(
+        (1 + 2 / math.log2(4)) / (2 + 1 / LOG3)
+    )
+
+
+def test_ndcg_needs_expected_articles() -> None:
+    with pytest.raises(ValueError, match="at least one expected article"):
+        ndcg_at_k([], set(), ["A"], 10)
+
+
+def test_graded_fields_default_to_nothing_and_answerable() -> None:
+    question = parse_question(raw())
+    assert question.also_relevant == ()
+    assert question.judged_not_relevant == ()
+    assert question.answerable is True
+
+
+def test_parse_question_reads_judgements_and_normalises_ids() -> None:
+    question = parse_question(
+        raw(also_relevant=["2402.00001v3"], judged_not_relevant=["2403.00001"])
+    )
+    assert question.also_relevant == ("2402.00001",)
+    assert question.judged_not_relevant == ("2403.00001",)
+
+
+def test_an_unanswerable_question_has_no_expected_article() -> None:
+    question = parse_question(raw(answerable=False, expected_articles=[]))
+    assert question.answerable is False
+    assert question.expected_articles == ()
+    without_key = {k: v for k, v in raw(answerable=False).items() if k != "expected_articles"}
+    assert parse_question(without_key).expected_articles == ()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"answerable": False}, "unanswerable question has no expected_articles"),
+        ({"answerable": "no"}, "answerable must be true or false"),
+        ({"also_relevant": ["2401.00001"]}, "cannot also be judged"),
+        ({"judged_not_relevant": ["2401.00001"]}, "cannot also be judged"),
+        (
+            {"equivalents": {"2401.00001": ["2402.00009"]}, "also_relevant": ["2402.00009"]},
+            "cannot also be judged",
+        ),
+        ({"also_relevant": ["2402.00001"], "judged_not_relevant": ["2402.00001"]}, "both relevant"),
+        (
+            {"answerable": False, "expected_articles": [], "also_relevant": ["2402.00001"]},
+            "no relevant",
+        ),
+        ({"also_relevant": "2402.00001"}, "must be a list"),
+    ],
+)
+def test_graded_fields_are_validated(overrides: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_question(raw(**overrides))

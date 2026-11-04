@@ -54,10 +54,10 @@ def test_table_layout() -> None:
     table = format_table("vector", summarize_results(RESULTS["vector"], KS), KS)
     assert table.splitlines() == [
         "== vector ==",
-        "group          n    R@1    R@3    MRR    s/q",
-        "all            3   0.17   0.50   0.50  0.000",
-        "factual        2   0.00   0.50   0.25  0.000",
-        "comparative    1   0.50   0.50   1.00  0.000",
+        "group          n    R@1    R@3    MRR  nDCG@10    s/q",
+        "all            3   0.17   0.50   0.50     0.41  0.000",
+        "factual        2   0.00   0.50   0.25     0.32  0.000",
+        "comparative    1   0.50   0.50   1.00     0.61  0.000",
     ]
 
 

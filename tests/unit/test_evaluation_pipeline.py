@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from graphrag.domain.evaluation import EvalQuestion
@@ -52,7 +54,13 @@ WEAK = ScriptedRetriever(
 def test_each_retriever_is_asked_every_question_at_the_deepest_k() -> None:
     retriever = ScriptedRetriever(GOOD.script)
     evaluate_retrieval(QUESTIONS, {"good": retriever}, ks=(1, 5))
-    assert retriever.depths == [5, 5, 5]
+    assert retriever.depths == [10, 10, 10]  # nDCG@10 always needs ten articles
+
+
+def test_the_depth_follows_the_largest_k_beyond_ten() -> None:
+    retriever = ScriptedRetriever(GOOD.script)
+    evaluate_retrieval(QUESTIONS, {"good": retriever}, ks=(3, 20))
+    assert retriever.depths == [20, 20, 20]
 
 
 def test_results_per_question() -> None:
@@ -177,3 +185,41 @@ def test_paired_differences_are_also_split_by_style() -> None:
     diffs = paired_differences(results["a"], results["b"], (1,))
     assert diffs["descriptive"]["mrr"].mean == 1.0
     assert diffs["named"]["mrr"].mean == 0.0
+
+
+def graded(qid: str, *articles: str, also: tuple[str, ...] = ()) -> EvalQuestion:
+    return EvalQuestion(
+        qid, "factual", f"question {qid}?", "a", articles, {}, True, also_relevant=also
+    )
+
+
+def test_ndcg_counts_the_also_relevant_articles_and_recall_does_not() -> None:
+    question = graded("g1", "A", also=("X",))
+    retriever = ScriptedRetriever({"question g1?": ["X", "A"]})
+    (result,) = evaluate_retrieval([question], {"r": retriever}, ks=(1, 3))["r"]
+    assert result.recall == {1: 0.0, 3: 1.0}  # X is not an expected article
+    assert result.reciprocal_rank == 0.5
+    expected = (1 / 1 + 2 / math.log2(3)) / (2 + 1 / math.log2(3))
+    assert result.ndcg == pytest.approx(expected)
+
+
+def test_unanswerable_questions_are_left_out_of_retrieval_metrics() -> None:
+    nothing = EvalQuestion("u1", "factual", "question u1?", "a", (), {}, True, answerable=False)
+    retriever = ScriptedRetriever({"question f1?": ["A"], "question u1?": ["Z"]})
+    results = evaluate_retrieval([QUESTIONS[0], nothing], {"r": retriever}, ks=(1,))["r"]
+    assert [r.question_id for r in results] == ["f1"]
+    assert retriever.depths == [10]  # asked once, for the answerable question only
+
+
+def test_paired_differences_include_ndcg() -> None:
+    results = evaluate_retrieval(
+        [graded("g1", "A", also=("X",))],
+        {
+            "a": ScriptedRetriever({"question g1?": ["A", "X"]}),
+            "b": ScriptedRetriever({"question g1?": ["X", "A"]}),
+        },
+        ks=(1,),
+    )
+    diff = paired_differences(results["a"], results["b"], (1,))["all"]
+    assert diff["ndcg@10"].mean < 0  # b ranks the expected article second
+    assert diff["mrr"].mean == pytest.approx(-0.5)
