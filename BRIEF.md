@@ -7,10 +7,10 @@
 | Étape | État |
 | --- | --- |
 | 1. Socle (structure, Docker Compose, CI) | **Terminée**, CI verte |
-| 2. Ingestion (arXiv, auteurs, citations → Neo4j) | **Terminée** : critère « 2e exécution sans doublon » validé sur les tests et sur de vraies données (lot de 100). **Le corpus complet (2 829 articles) n'est pas encore ingéré.** |
-| 3. RAG de base | **Non commencée.** Attendre le feu vert de l'utilisateur. |
+| 2. Ingestion (arXiv, auteurs, citations → Neo4j) | **Terminée**, corpus complet ingéré le 2026-11-04. |
+| 3. RAG de base | **Commencée** : découpage des résumés et port `Embedder` faits. En attente : choix du modèle d'embeddings et du LLM. |
 
-État de la base locale : 100 articles, 295 auteurs, 295 `AUTHORED_BY`, 2 `CITES`. Les deux `CITES` vont dans les deux sens entre `2511.05385` et `2511.12003` : à vérifier à la main.
+État de la base locale (2026-11-04) : 2 827 articles, 10 383 auteurs, 11 203 `AUTHORED_BY`, 924 `CITES` (539 articles citent, 526 sont cités). Semantic Scholar : 2 324 articles trouvés, 3 inconnus, 93 sans référence arXiv.
 
 ## 2. Décisions prises (ne pas les rouvrir sans raison)
 
@@ -28,6 +28,8 @@
 - **Fusion de la recherche hybride** : décidé le 2026-11-03, option A (Reciprocal Rank Fusion, `1/(60 + rang)`, fusion en Python dans `pipeline/`). **Option B à essayer après l'étape 4** : somme pondérée de scores normalisés (min-max, poids à régler sur le jeu de test), si le jeu de test montre un écart.
 - Normalisation des noms de méthodes/benchmarks (avant l'étape 6), taille du lot d'extraction, nombre de testeurs, seuils de latence et de coût.
 - Licence du dépôt (aucun fichier `LICENSE` pour l'instant).
+- **Densité du graphe de citations** (à trancher à l'étape de l'élargissement par le graphe) : 924 `CITES` pour 2 827 articles, car un lien n'existe que si les deux articles sont dans la fenêtre de 12 mois. Option A : garder les articles cités hors corpus comme nœuds minces (id + titre, sans résumé). Option B : élargir la fenêtre (par exemple 24 mois).
+- **Doublons arXiv** (à trancher à l'étape 3) : un même travail déposé deux fois sur arXiv donne deux nœuds `Article`, par exemple `2608.12129` et `2606.15971`. Semantic Scholar les signale comme alias, dans le log de l'ingestion (`arXiv alias: ...`) ; d'autres existent sans doute sans être signalés.
 
 ## 4. Préférences de l'utilisateur (importantes)
 
