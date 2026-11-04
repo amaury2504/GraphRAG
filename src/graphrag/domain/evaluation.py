@@ -9,7 +9,7 @@ from typing import Any, Literal, get_args
 from graphrag.domain.identifiers import normalize_arxiv_id
 
 QuestionType = Literal["factual", "relational", "comparative", "evolutive"]
-QUESTION_TYPES: tuple[str, ...] = get_args(QuestionType)
+QUESTION_TYPES: tuple[QuestionType, ...] = get_args(QuestionType)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +64,7 @@ def parse_question(data: Mapping[str, Any]) -> EvalQuestion:
         raise ValueError(f"{qid}: validated must be true or false")
     return EvalQuestion(
         id=qid,
-        type=kind,  # type: ignore[arg-type]  # checked against QUESTION_TYPES above
+        type=kind,
         question=_text(data, "question"),
         expected_answer=_text(data, "expected_answer"),
         expected_articles=articles,

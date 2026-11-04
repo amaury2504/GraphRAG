@@ -244,6 +244,11 @@ class Neo4jStore:
                 f"{dimensions}: drop the index and the chunks, then index again"
             )
 
+    def all_articles(self) -> list[Article]:
+        with self._driver.session() as session:
+            result = session.run("MATCH (a:Article) RETURN a ORDER BY a.arxiv_id")
+            return [_article(record["a"]) for record in result]
+
     def articles_without_chunks(self, limit: int | None = None) -> list[Article]:
         query = ARTICLES_WITHOUT_CHUNKS + (" LIMIT $limit" if limit is not None else "")
         with self._driver.session() as session:

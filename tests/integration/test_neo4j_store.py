@@ -94,6 +94,12 @@ def test_articles_are_stored_with_all_properties(store: Neo4jStore) -> None:
     assert node["author_names"] == ["Ann", "Bob"]
 
 
+def test_all_articles_returns_complete_articles_in_id_order(store: Neo4jStore) -> None:
+    store.upsert_articles([art(2), art(1)])
+    ours = [a for a in store.all_articles() if a.arxiv_id.startswith("9999.")]
+    assert ours == [art(1), art(2)]
+
+
 def test_existing_article_is_not_reinserted_or_modified(store: Neo4jStore) -> None:
     before = store.counts()
     store.upsert_articles([art(1, "original")])
