@@ -46,6 +46,41 @@ class SearchHit:
 
 
 @dataclass(frozen=True, slots=True)
+class Usage:
+    """Tokens consumed by language model calls."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(
+            self.prompt_tokens + other.prompt_tokens,
+            self.completion_tokens + other.completion_tokens,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Completion:
+    text: str
+    usage: Usage
+
+
+@dataclass(frozen=True, slots=True)
+class Answer:
+    """A written answer. `citations` are the sources the text cites, in order of first mention."""
+
+    question: str
+    text: str
+    citations: tuple[SearchHit, ...]
+    retrieved: tuple[SearchHit, ...]
+    usage: Usage
+
+
+@dataclass(frozen=True, slots=True)
 class Author:
     key: str
     name: str
