@@ -176,6 +176,8 @@ Trois mesures faites à l'instant :
 
 > **Mise à jour (2026-11-04, plus tard)** : le point 1 est implémenté (champ `style`, `--style named|descriptive`, détecteur de fuite à fréquence ≤ 3, `title_overlap` enregistré, tableaux par style dans `evaluate`). Reste : générer les 10 questions (3 factuelles + 2 comparatives descriptives, 2 factuelles + 3 comparatives nommées) après accord sur l'appel Mistral.
 
+> **Mise à jour (2026-11-04, fin de journée)** : implémentés sans appel Mistral, un commit chacun, tous poussés : point 4 (analyseur `english` + `--with-keyword` dans `evaluate`, l'index se reconstruit seul si l'analyseur diffère), point 5 en partie (50 candidats, `max(50, 2k)` ; la constante RRF reste à régler sur le jeu de test), point 6 (le LLM reçoit le résumé complet, `SearchHit.abstract`), point 9 (`IndexInfo` : fiche modèle/révision/dimensions/modèle de texte, vérifiée par `evaluate` et l'API, enregistrée sur la base réelle), point 12 (`timings` dans `/ask`, `mode` renommé `configuration`), point 13 (test de bout en bout). **Restent** : points 2, 3, 7, 8, 10, 11, 14, 15, 16 et la génération des 10 questions (accord Mistral requis). **Le conteneur `api` n'est pas reconstruit** : il tourne avec l'ancien code (`docker compose up -d --build api`).
+
 ### La décision immédiate
 Les 10 questions attendent, avec leurs groupes d'articles déjà choisis. Je propose de faire **d'abord le point 1** (style descriptif et détecteur de fuite, environ une heure, testé), puis de générer les 10 questions en deux moitiés : 5 descriptives et 5 nommées. Sinon, elles hériteront toutes du biais des noms. On fait comme ça, ou je génère tout de suite avec la consigne actuelle ?
 
