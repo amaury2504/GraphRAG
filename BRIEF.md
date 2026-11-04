@@ -30,7 +30,14 @@
 - Normalisation des noms de méthodes/benchmarks (avant l'étape 6), taille du lot d'extraction, nombre de testeurs, seuils de latence et de coût.
 - Licence du dépôt (aucun fichier `LICENSE` pour l'instant).
 - **Densité du graphe de citations** (à trancher à l'étape de l'élargissement par le graphe) : 924 `CITES` pour 2 827 articles, car un lien n'existe que si les deux articles sont dans la fenêtre de 12 mois. Option A : garder les articles cités hors corpus comme nœuds minces (id + titre, sans résumé). Option B : élargir la fenêtre (par exemple 24 mois).
-- **Doublons arXiv** (à trancher à l'étape 3) : un même travail déposé deux fois sur arXiv donne deux nœuds `Article`, par exemple `2608.12129` et `2606.15971`. Semantic Scholar les signale comme alias, dans le log de l'ingestion (`arXiv alias: ...`) ; d'autres existent sans doute sans être signalés.
+- **Doublons arXiv** (à trancher à l'étape 3) : un même travail déposé deux fois sur arXiv donne deux nœuds `Article`, par exemple `2608.12129` et `2606.15971`. Semantic Scholar les signale comme alias, dans le log de l'ingestion (`arXiv alias: ...`) ; d'autres existent sans doute sans être signalés. Pour l'évaluation, un titre identique est traité comme équivalent (`equivalents` dans les questions).
+- **Jeu de test, décidé le 2026-11-04** : articles groupés par proximité de thème (jamais par le graphe), questions générées par Mistral puis validées à la main dans `eval/questions.jsonl` (`"validated": true`). Option B retenue après relecture : **l'étape 4 ne contient que des questions factuelles et comparatives**. Les questions générées citent souvent les noms des systèmes, ce qui facilite la recherche : à signaler dans le rapport.
+- **Reporté aux étapes 5 à 7** (à trancher alors) :
+  - Questions **relationnelles et évolutives** : avec des articles seulement voisins par le thème, le modèle invente des liens ou des filiations (premier lot : relational-02 chronologiquement impossible, deux « évolutions » inventées). Les reconstruire quand le graphe donne un sens à « relation ».
+  - Questions fondées sur les **citations** : elles favorisent le graphe par construction, et les citations viennent de Semantic Scholar, **dont les données ne doivent pas aller dans le dépôt public**. Les auteurs viennent d'OpenAlex (CC0), sans cette restriction.
+  - Questions **temporelles** (« parus avant mars 2026 ») : demandent un filtre par date, absent de la recherche.
+  - **Dates arXiv** : 94 articles sur 2 827 ont une date de v1 antérieure de 2 mois ou plus au mois de leur identifiant (par exemple M-RAG `2603.26667`, v1 au 6 janvier 2026). Notre base reproduit fidèlement l'API arXiv ; l'écart vient de la source. À garder en tête pour toute logique fondée sur les dates.
+  - Les réponses attendues devraient séparer ce que dit l'article de ce qui est déduit.
 
 ## 4. Préférences de l'utilisateur (importantes)
 
