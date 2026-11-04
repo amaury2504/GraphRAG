@@ -67,6 +67,9 @@ tests/
 # évaluation (recherche)     : uv run python -m graphrag.cli.evaluate [--ks 1 3 5 10] [--include-unvalidated]
 #                              (rappel@k et MRR pour vector et hybrid, sans LLM ; questions dans eval/questions.jsonl,
 #                              seules celles avec "validated": true sont utilisées ; rapport JSON dans eval/results/)
+# pooling des jugements      : uv run python -m graphrag.cli.pool [--depth 10]   (sans LLM ; écrit eval/pool_review.jsonl :
+#                              mettre "relevant": true/false sur chaque article, puis
+#                              uv run python -m graphrag.cli.pool --apply eval/pool_review.jsonl)
 # évaluation (réponses)      : (à définir)
 # rapport d'usage            : (à définir)
 ```
