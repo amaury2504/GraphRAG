@@ -72,9 +72,20 @@ OPTIONS {{indexConfig: {{
 """
 
 
-CREATE_FULLTEXT_INDEX = (
-    f"CREATE FULLTEXT INDEX {FULLTEXT_INDEX} IF NOT EXISTS FOR (c:Chunk) ON EACH [c.search_text]"
+# "english" drops stop words and reduces words to their stem ("agents" matches "agent").
+# `IF NOT EXISTS` is a no-op when an index on the same label and property exists, whatever
+# its options, so a different analyzer is only applied by dropping the index first.
+FULLTEXT_ANALYZER = "english"
+CREATE_FULLTEXT_INDEX = f"""
+CREATE FULLTEXT INDEX {FULLTEXT_INDEX} IF NOT EXISTS FOR (c:Chunk) ON EACH [c.search_text]
+OPTIONS {{indexConfig: {{`fulltext.analyzer`: '{FULLTEXT_ANALYZER}'}}}}
+"""
+FULLTEXT_INDEX_OPTIONS = (
+    "SHOW FULLTEXT INDEXES YIELD name, options WHERE name = $name RETURN options"
 )
+DROP_FULLTEXT_INDEX = f"DROP INDEX {FULLTEXT_INDEX} IF EXISTS"
+AWAIT_INDEX = "CALL db.awaitIndex($name, $seconds)"
+INDEX_BUILD_SECONDS = 600
 VECTOR_INDEX_OPTIONS = "SHOW VECTOR INDEXES YIELD name, options WHERE name = $name RETURN options"
 
 ARTICLES_WITHOUT_CHUNKS = """
@@ -233,7 +244,7 @@ class Neo4jStore:
         with self._driver.session() as session:
             session.run(CHUNK_KEY_CONSTRAINT).consume()
             session.run(create_vector_index(dimensions)).consume()
-            session.run(CREATE_FULLTEXT_INDEX).consume()
+            self._ensure_fulltext_index(session)
             record = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single()
         if record is None:
             raise RuntimeError(f"vector index {VECTOR_INDEX} was not created")
@@ -243,6 +254,20 @@ class Neo4jStore:
                 f"vector index {VECTOR_INDEX} has {existing} dimensions, the embedder has "
                 f"{dimensions}: drop the index and the chunks, then index again"
             )
+
+    @staticmethod
+    def _ensure_fulltext_index(session: neo4j.Session) -> None:
+        """Create the keyword index, rebuilding it if it uses another analyzer.
+
+        The index only copies `search_text`, so dropping it loses nothing.
+        """
+        record = session.run(FULLTEXT_INDEX_OPTIONS, name=FULLTEXT_INDEX).single()
+        if record is not None:
+            current = record["options"]["indexConfig"].get("fulltext.analyzer")
+            if current != FULLTEXT_ANALYZER:
+                session.run(DROP_FULLTEXT_INDEX).consume()
+        session.run(CREATE_FULLTEXT_INDEX).consume()
+        session.run(AWAIT_INDEX, name=FULLTEXT_INDEX, seconds=INDEX_BUILD_SECONDS).consume()
 
     def all_articles(self) -> list[Article]:
         with self._driver.session() as session:

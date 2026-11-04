@@ -10,7 +10,12 @@ from collections.abc import Iterator
 import neo4j
 import pytest
 
-from graphrag.adapters.neo4j_store import FULLTEXT_INDEX, VECTOR_INDEX, Neo4jStore
+from graphrag.adapters.neo4j_store import (
+    FULLTEXT_ANALYZER,
+    FULLTEXT_INDEX,
+    VECTOR_INDEX,
+    Neo4jStore,
+)
 from graphrag.domain.models import Chunk, IndexedChunk
 from tests.integration.test_neo4j_store import URI, USER, _cleanup, _password, art
 
@@ -158,3 +163,35 @@ def test_fulltext_index_searches_title_and_chunk(store: Neo4jStore) -> None:
         )
     assert [r["key"] for r in by_text] == ["9999.00001#0"]
     assert [r["key"] for r in by_title] == ["9999.00001#0"]
+
+
+def _analyzer() -> str:
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        records, _, _ = driver.execute_query(
+            "SHOW FULLTEXT INDEXES YIELD name, options WHERE name = $name RETURN options",
+            name=FULLTEXT_INDEX,
+        )
+    return str(records[0]["options"]["indexConfig"]["fulltext.analyzer"])
+
+
+def test_keyword_search_matches_word_forms_and_ignores_stop_words(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "zqxwv autonomous agent", 0)])
+    assert _analyzer() == FULLTEXT_ANALYZER
+    assert "9999.00001" in [h.arxiv_id for h in store.keyword_search("zqxwv agents", 10)]
+    assert store.keyword_search("the of and", 10) == []
+
+
+def test_an_index_with_another_analyzer_is_rebuilt(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "zqxwv agent", 0)])
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        driver.execute_query(f"DROP INDEX {FULLTEXT_INDEX}")
+        driver.execute_query(
+            f"CREATE FULLTEXT INDEX {FULLTEXT_INDEX} FOR (c:Chunk) ON EACH [c.search_text] "
+            "OPTIONS {indexConfig: {`fulltext.analyzer`: 'standard-no-stop-words'}}"
+        )
+    assert _analyzer() == "standard-no-stop-words"
+    store.ensure_chunk_schema(DIMENSIONS)
+    assert _analyzer() == FULLTEXT_ANALYZER
+    assert "9999.00001" in [h.arxiv_id for h in store.keyword_search("zqxwv agents", 10)]
