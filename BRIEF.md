@@ -182,6 +182,8 @@ Trois mesures faites à l'instant :
 
 > **Mise à jour (point 2 du § 4)** : implémenté, sans LLM : `also_relevant`, `judged_not_relevant`, `answerable` dans les questions ; nDCG@10 gradué (attendu = 2, `also_relevant` = 1) dans `evaluate` ; `cli.pool` (fichier de relecture, `--apply`). **À faire par l'utilisateur** : juger `eval/pool_review.jsonl` (41 articles pour les 3 questions validées, soit ~14 par question : à 50 questions, plus de 600 jugements ; envisager `--depth 5`), valider `eval/unanswerable_drafts.jsonl` (5 brouillons ; le score « sait dire je ne trouve pas » demande le juge LLM de réponses, point 16). **Refaire le pooling quand `graph` arrivera.**
 
+> **Mise à jour (point 3 du § 4)** : fait. `evaluate` affiche l'écart minimal détectable (80 % de puissance, d'après l'écart-type observé des différences appariées) et accepte `--split tune|report` (moitié décidée par le hachage de l'identifiant : stable quand on ajoute des questions). Règle : tout réglage (constante RRF, nombre de candidats) se choisit avec `--split tune`, puis se rapporte avec `--split report`, sans retoucher. **Restent, tous en attente d'une décision de l'utilisateur** : 7 (traduction ou modèle multilingue), 8 (reclasseur), 16 (juge LLM : modèle différent du générateur), 10 et 11 (étape 5, graphe), et la validation des questions et des jugements.
+
 ### La décision immédiate
 Les 10 questions attendent, avec leurs groupes d'articles déjà choisis. Je propose de faire **d'abord le point 1** (style descriptif et détecteur de fuite, environ une heure, testé), puis de générer les 10 questions en deux moitiés : 5 descriptives et 5 nommées. Sinon, elles hériteront toutes du biais des noms. On fait comme ça, ou je génère tout de suite avec la consigne actuelle ?
 

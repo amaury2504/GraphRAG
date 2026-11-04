@@ -64,7 +64,8 @@ tests/
 #                              (descriptive : une question qui reprend un mot rare du titre est réécrite une fois, sinon rejetée)
 #                              (appelle Mistral : 8 questions max sans --confirm-cost ; écrit eval/candidates.jsonl,
 #                              à relire puis à copier dans eval/questions.jsonl avec "validated": true)
-# évaluation (recherche)     : uv run python -m graphrag.cli.evaluate [--ks 1 3 5 10] [--include-unvalidated]
+# évaluation (recherche)     : uv run python -m graphrag.cli.evaluate [--ks 1 3 5 10] [--include-unvalidated] [--split tune|report] [--with-keyword]
+#                              (--split : régler sur « tune », rapporter sur « report » ; nDCG@10 et écart minimal détectable affichés)
 #                              (rappel@k et MRR pour vector et hybrid, sans LLM ; questions dans eval/questions.jsonl,
 #                              seules celles avec "validated": true sont utilisées ; rapport JSON dans eval/results/)
 # pooling des jugements      : uv run python -m graphrag.cli.pool [--depth 10]   (sans LLM ; écrit eval/pool_review.jsonl :
