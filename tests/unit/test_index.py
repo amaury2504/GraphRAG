@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from graphrag.cli.index import index_articles, run_indexing
-from graphrag.domain.models import Article, IndexedChunk
+from graphrag.domain.models import Article, IndexedChunk, IndexInfo
 
 
 def article(n: int, abstract: str = "One sentence.", title: str = "Title") -> Article:
@@ -35,6 +35,9 @@ class FakeChunkStore:
 
     def ensure_chunk_schema(self, dimensions: int) -> None:
         self.schema_dimensions.append(dimensions)
+
+    def ensure_index_info(self, info: IndexInfo) -> None:
+        self.infos = [*getattr(self, "infos", []), info]
 
     def articles_without_chunks(self, limit: int | None = None) -> list[Article]:
         done = {c.chunk.arxiv_id for c in self.chunks.values()}
@@ -137,3 +140,16 @@ def test_progress_is_logged_per_batch() -> None:
         "chunks: 2/3 articles indexed, 2 chunks",
         "chunks: 3/3 articles indexed, 3 chunks",
     ]
+
+
+def test_indexing_records_the_fingerprint_when_given_and_before_writing() -> None:
+    store = FakeChunkStore([])
+    info = IndexInfo("m", "r", 2, "title. chunk")
+    run_indexing(store, FakeEmbedder(), info=info, log=quiet)
+    assert store.infos == [info]
+
+
+def test_indexing_without_a_fingerprint_does_not_record_one() -> None:
+    store = FakeChunkStore([])
+    run_indexing(store, FakeEmbedder(), log=quiet)
+    assert not hasattr(store, "infos")

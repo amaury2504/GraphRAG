@@ -10,10 +10,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from graphrag.adapters.neo4j_store import Neo4jStore
-from graphrag.adapters.sentence_transformer import load_default_embedder
+from graphrag.adapters.sentence_transformer import default_index_info, load_default_embedder
 from graphrag.cli.ingest import log_line
 from graphrag.domain.chunking import chunk_abstract, search_text
-from graphrag.domain.models import Article, IndexedChunk
+from graphrag.domain.models import Article, IndexedChunk, IndexInfo
 from graphrag.ports.embedding import Embedder
 from graphrag.ports.indexing import ChunkStore
 from graphrag.settings import Settings
@@ -46,8 +46,11 @@ def run_indexing(
     limit: int | None = None,
     batch_size: int = ARTICLES_PER_BATCH,
     log: Callable[[str], None] = log_line,
+    info: IndexInfo | None = None,
 ) -> IndexReport:
     store.ensure_chunk_schema(embedder.dimensions)
+    if info is not None:
+        store.ensure_index_info(info)
     todo = store.articles_without_chunks(limit)
     log(f"chunks: {len(todo)} articles to index")
     written = 0
@@ -75,7 +78,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     with Neo4jStore(
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     ) as store:
-        report = run_indexing(store, embedder, limit=args.limit, batch_size=args.batch_size)
+        report = run_indexing(
+            store,
+            embedder,
+            limit=args.limit,
+            batch_size=args.batch_size,
+            info=default_index_info(embedder.dimensions),
+        )
     print(report)
     return 0
 

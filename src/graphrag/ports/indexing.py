@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 from typing import Protocol
 
-from graphrag.domain.models import Article, IndexedChunk
+from graphrag.domain.models import Article, IndexedChunk, IndexInfo
 
 
 class ChunkStore(Protocol):
@@ -10,6 +10,10 @@ class ChunkStore(Protocol):
 
         Fails if a vector index already exists with another number of dimensions.
         """
+        ...
+
+    def ensure_index_info(self, info: IndexInfo) -> None:
+        """Record what the vectors are built with, or fail if another model/template is recorded."""
         ...
 
     def articles_without_chunks(self, limit: int | None = None) -> list[Article]:

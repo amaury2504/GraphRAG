@@ -71,6 +71,25 @@ class Completion:
 
 
 @dataclass(frozen=True, slots=True)
+class IndexInfo:
+    """What the chunk vectors were built with. Two models can share a dimension count, so the
+    dimension alone cannot tell that stored vectors and a query vector are comparable."""
+
+    model: str
+    revision: str
+    dimensions: int
+    text_template: str  # how the embedded text is built, e.g. "title. chunk"
+
+    def differences(self, other: IndexInfo) -> list[str]:
+        """Human-readable list of what differs from `other` (empty when identical)."""
+        return [
+            f"{name}: stored {getattr(self, name)!r}, current {getattr(other, name)!r}"
+            for name in ("model", "revision", "dimensions", "text_template")
+            if getattr(self, name) != getattr(other, name)
+        ]
+
+
+@dataclass(frozen=True, slots=True)
 class Timings:
     """Seconds spent in each stage of answering a question."""
 

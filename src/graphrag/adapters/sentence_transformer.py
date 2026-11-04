@@ -3,6 +3,9 @@
 from collections.abc import Sequence
 from typing import Any, Protocol
 
+from graphrag.domain.chunking import TEXT_TEMPLATE
+from graphrag.domain.models import IndexInfo
+
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 # Pinned model revision (Hugging Face commit), like the other dependencies.
 MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
@@ -84,6 +87,11 @@ class SentenceTransformerEmbedder:
         if len(vectors) != expected or any(len(v) != self._dimensions for v in vectors):
             raise ValueError(f"expected {expected} vectors of {self._dimensions} dimensions")
         return vectors
+
+
+def default_index_info(dimensions: int) -> IndexInfo:
+    """The fingerprint of an index built with the pinned model and the title+chunk text."""
+    return IndexInfo(MODEL_NAME, MODEL_REVISION, dimensions, TEXT_TEMPLATE)
 
 
 def load_default_embedder(*, cache_folder: str | None = None) -> SentenceTransformerEmbedder:

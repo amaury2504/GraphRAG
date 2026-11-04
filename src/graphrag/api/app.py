@@ -153,7 +153,7 @@ def build_answerer(settings: Settings) -> QuestionAnswerer:
     # Imported here: they pull in torch, which /health does not need.
     from graphrag.adapters.mistral import MistralLLM, mistral_client
     from graphrag.adapters.neo4j_store import Neo4jStore
-    from graphrag.adapters.sentence_transformer import load_default_embedder
+    from graphrag.adapters.sentence_transformer import default_index_info, load_default_embedder
     from graphrag.pipeline.retrieval import HybridRetriever, VectorRetriever
     from graphrag.pipeline.usage import MeteredLLM, UsageMeter
 
@@ -161,6 +161,11 @@ def build_answerer(settings: Settings) -> QuestionAnswerer:
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     )
     embedder = load_default_embedder()
+    try:
+        store.check_index_info(default_index_info(embedder.dimensions))
+    except ValueError as exc:
+        store.close()
+        raise NotConfiguredError(str(exc)) from exc
     llm = MeteredLLM(
         MistralLLM(mistral_client(key), model=settings.mistral_model),
         UsageMeter(settings.token_alert),

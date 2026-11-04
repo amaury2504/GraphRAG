@@ -16,7 +16,7 @@ from graphrag.adapters.neo4j_store import (
     VECTOR_INDEX,
     Neo4jStore,
 )
-from graphrag.domain.models import Chunk, IndexedChunk
+from graphrag.domain.models import Chunk, IndexedChunk, IndexInfo
 from tests.integration.test_neo4j_store import URI, USER, _cleanup, _password, art
 
 pytestmark = pytest.mark.integration
@@ -208,3 +208,42 @@ def test_searches_return_the_whole_abstract_of_the_article(store: Neo4jStore) ->
         assert mine
         assert all(h.abstract == article.abstract for h in mine)
     assert by_keywords[0].text == "zqxwv first part"  # still the matching chunk
+
+
+INFO = IndexInfo("test-model", "rev1", DIMENSIONS, "title. chunk")
+
+
+@pytest.fixture
+def clean_info(store: Neo4jStore) -> Iterator[Neo4jStore]:
+    """Run with no fingerprint, then put back the real one."""
+    saved = store.read_index_info()
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        driver.execute_query("MATCH (i:IndexInfo {name: 'chunks'}) DELETE i")
+    yield store
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        driver.execute_query("MATCH (i:IndexInfo {name: 'chunks'}) DELETE i")
+    if saved is not None:
+        store.ensure_index_info(saved)
+
+
+def test_the_first_fingerprint_is_recorded_and_read_back(clean_info: Neo4jStore) -> None:
+    assert clean_info.read_index_info() is None
+    clean_info.ensure_index_info(INFO)
+    assert clean_info.read_index_info() == INFO
+    clean_info.ensure_index_info(INFO)  # repeatable
+    clean_info.check_index_info(INFO)
+
+
+def test_another_model_with_the_same_dimensions_is_refused(clean_info: Neo4jStore) -> None:
+    clean_info.ensure_index_info(INFO)
+    other = IndexInfo("other-model", "rev1", DIMENSIONS, "title. chunk")
+    with pytest.raises(ValueError, match="model: stored 'test-model', current 'other-model'"):
+        clean_info.ensure_index_info(other)
+    with pytest.raises(ValueError, match="built differently"):
+        clean_info.check_index_info(other)
+    assert clean_info.read_index_info() == INFO  # a refusal changes nothing
+
+
+def test_checking_without_a_recorded_fingerprint_fails(clean_info: Neo4jStore) -> None:
+    with pytest.raises(ValueError, match="no index fingerprint"):
+        clean_info.check_index_info(INFO)

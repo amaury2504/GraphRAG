@@ -8,6 +8,7 @@ from graphrag.domain.models import (
     Article,
     GraphCounts,
     IndexedChunk,
+    IndexInfo,
     ReferenceRecord,
     SearchHit,
     WorkRecord,
@@ -55,6 +56,9 @@ MERGE (s)-[:CITES]->(t)
 VECTOR_INDEX = "chunk_embedding"
 FULLTEXT_INDEX = "chunk_text"
 
+INDEX_INFO_CONSTRAINT = (
+    "CREATE CONSTRAINT index_info_name IF NOT EXISTS FOR (i:IndexInfo) REQUIRE i.name IS UNIQUE"
+)
 CHUNK_KEY_CONSTRAINT = (
     "CREATE CONSTRAINT chunk_key IF NOT EXISTS FOR (c:Chunk) REQUIRE c.key IS UNIQUE"
 )
@@ -86,6 +90,14 @@ FULLTEXT_INDEX_OPTIONS = (
 DROP_FULLTEXT_INDEX = f"DROP INDEX {FULLTEXT_INDEX} IF EXISTS"
 AWAIT_INDEX = "CALL db.awaitIndex($name, $seconds)"
 INDEX_BUILD_SECONDS = 600
+
+INDEX_INFO_NAME = "chunks"
+READ_INDEX_INFO = "MATCH (i:IndexInfo {name: $name}) RETURN i"
+WRITE_INDEX_INFO = """
+MERGE (i:IndexInfo {name: $name})
+SET i.model = $model, i.revision = $revision, i.dimensions = $dimensions,
+    i.text_template = $text_template
+"""
 VECTOR_INDEX_OPTIONS = "SHOW VECTOR INDEXES YIELD name, options WHERE name = $name RETURN options"
 
 ARTICLES_WITHOUT_CHUNKS = """
@@ -244,6 +256,7 @@ class Neo4jStore:
             raise ValueError(f"dimensions must be a positive integer, got {dimensions!r}")
         with self._driver.session() as session:
             session.run(CHUNK_KEY_CONSTRAINT).consume()
+            session.run(INDEX_INFO_CONSTRAINT).consume()
             session.run(create_vector_index(dimensions)).consume()
             self._ensure_fulltext_index(session)
             record = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single()
@@ -254,6 +267,53 @@ class Neo4jStore:
             raise ValueError(
                 f"vector index {VECTOR_INDEX} has {existing} dimensions, the embedder has "
                 f"{dimensions}: drop the index and the chunks, then index again"
+            )
+
+    def read_index_info(self) -> IndexInfo | None:
+        """What the stored vectors were built with, or None if nothing is recorded yet."""
+        with self._driver.session() as session:
+            record = session.run(READ_INDEX_INFO, name=INDEX_INFO_NAME).single()
+        if record is None:
+            return None
+        node = record["i"]
+        return IndexInfo(
+            model=node["model"],
+            revision=node["revision"],
+            dimensions=node["dimensions"],
+            text_template=node["text_template"],
+        )
+
+    def ensure_index_info(self, info: IndexInfo) -> None:
+        """Record the fingerprint if none exists; refuse any other one.
+
+        A database indexed before this check existed has no fingerprint: the first call
+        adopts the current one, so run it only with the model that built the vectors.
+        """
+        stored = self.read_index_info()
+        if stored is None:
+            with self._driver.session() as session:
+                session.run(
+                    WRITE_INDEX_INFO,
+                    name=INDEX_INFO_NAME,
+                    model=info.model,
+                    revision=info.revision,
+                    dimensions=info.dimensions,
+                    text_template=info.text_template,
+                ).consume()
+            return
+        self.check_index_info(info)
+
+    def check_index_info(self, info: IndexInfo) -> None:
+        """Raise unless the stored vectors were built with `info` (use before searching)."""
+        stored = self.read_index_info()
+        if stored is None:
+            raise ValueError("no index fingerprint is recorded: run graphrag.cli.index once")
+        differences = stored.differences(info)
+        if differences:
+            raise ValueError(
+                "the stored vectors were built differently: "
+                + "; ".join(differences)
+                + ". Drop the chunks and index again, or use the original model"
             )
 
     @staticmethod

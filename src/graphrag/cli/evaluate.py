@@ -15,7 +15,12 @@ from typing import Any
 
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.question_file import DEFAULT_PATH, read_questions
-from graphrag.adapters.sentence_transformer import MODEL_NAME, MODEL_REVISION, load_default_embedder
+from graphrag.adapters.sentence_transformer import (
+    MODEL_NAME,
+    MODEL_REVISION,
+    default_index_info,
+    load_default_embedder,
+)
 from graphrag.domain.evaluation import EvalQuestion, Summary
 from graphrag.pipeline.evaluation import (
     DEFAULT_KS,
@@ -191,6 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with Neo4jStore(
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     ) as store:
+        store.check_index_info(default_index_info(embedder.dimensions))
         retrievers: dict[str, Retriever] = {
             "vector": VectorRetriever(store, embedder),
             "hybrid": HybridRetriever(store, embedder),

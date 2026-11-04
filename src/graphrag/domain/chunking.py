@@ -17,6 +17,9 @@ def split_sentences(text: str) -> list[str]:
     return _SENTENCE_END.split(normalized)
 
 
+TEXT_TEMPLATE = "title. chunk"  # what `search_text` builds; recorded with the index
+
+
 def search_text(title: str, chunk_text: str) -> str:
     """The text that gets embedded and keyword-indexed: the article title, then the chunk.
 
