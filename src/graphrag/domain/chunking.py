@@ -17,6 +17,19 @@ def split_sentences(text: str) -> list[str]:
     return _SENTENCE_END.split(normalized)
 
 
+def search_text(title: str, chunk_text: str) -> str:
+    """The text that gets embedded and keyword-indexed: the article title, then the chunk.
+
+    The title gives context to chunks that no longer name the topic ("We evaluate on...").
+    """
+    clean_title = " ".join(title.split())
+    if not clean_title:
+        return chunk_text
+    if clean_title[-1] not in ".!?":
+        clean_title += "."
+    return f"{clean_title} {chunk_text}"
+
+
 def chunk_abstract(
     arxiv_id: str, abstract: str, max_words: int = DEFAULT_MAX_WORDS
 ) -> tuple[Chunk, ...]:

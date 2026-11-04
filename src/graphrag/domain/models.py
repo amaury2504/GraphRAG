@@ -22,6 +22,19 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class IndexedChunk:
+    """A chunk ready to store: `search_text` (title + chunk) is what gets embedded and indexed."""
+
+    chunk: Chunk
+    search_text: str
+    embedding: tuple[float, ...]
+
+    @property
+    def key(self) -> str:
+        return f"{self.chunk.arxiv_id}#{self.chunk.position}"
+
+
+@dataclass(frozen=True, slots=True)
 class Author:
     key: str
     name: str

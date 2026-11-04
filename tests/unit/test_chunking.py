@@ -1,6 +1,21 @@
 import pytest
 
-from graphrag.domain.chunking import chunk_abstract, split_sentences
+from graphrag.domain.chunking import chunk_abstract, search_text, split_sentences
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("GraphRAG at scale", "GraphRAG at scale. Body."),
+        ("Is RAG enough?", "Is RAG enough? Body."),
+        ("Ends with a period.", "Ends with a period. Body."),
+        ("  Spread\n over   lines ", "Spread over lines. Body."),
+        ("", "Body."),
+        ("   ", "Body."),
+    ],
+)
+def test_search_text_puts_the_title_first(title: str, expected: str) -> None:
+    assert search_text(title, "Body.") == expected
 
 
 def words(n: int, prefix: str = "w") -> str:

@@ -30,6 +30,7 @@ def _password() -> str:
 
 def _cleanup() -> None:
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        driver.execute_query("MATCH (c:Chunk) WHERE c.arxiv_id STARTS WITH '9999.' DETACH DELETE c")
         driver.execute_query(
             "MATCH (a:Article) WHERE a.arxiv_id STARTS WITH '9999.' DETACH DELETE a"
         )

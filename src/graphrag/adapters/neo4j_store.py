@@ -4,7 +4,13 @@ from typing import Any
 
 import neo4j
 
-from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
+from graphrag.domain.models import (
+    Article,
+    GraphCounts,
+    IndexedChunk,
+    ReferenceRecord,
+    WorkRecord,
+)
 
 WRITE_BATCH = 500
 
@@ -43,6 +49,61 @@ MATCH (t:Article {arxiv_id: cited_id})
 WHERE t <> s
 MERGE (s)-[:CITES]->(t)
 """
+
+
+VECTOR_INDEX = "chunk_embedding"
+FULLTEXT_INDEX = "chunk_text"
+
+CHUNK_KEY_CONSTRAINT = (
+    "CREATE CONSTRAINT chunk_key IF NOT EXISTS FOR (c:Chunk) REQUIRE c.key IS UNIQUE"
+)
+
+
+def create_vector_index(dimensions: int) -> str:
+    """Schema commands take the size as a literal; callers pass a checked int."""
+    return f"""
+CREATE VECTOR INDEX {VECTOR_INDEX} IF NOT EXISTS
+FOR (c:Chunk) ON c.embedding
+OPTIONS {{indexConfig: {{
+  `vector.dimensions`: {dimensions},
+  `vector.similarity_function`: 'cosine'
+}}}}
+"""
+
+
+CREATE_FULLTEXT_INDEX = (
+    f"CREATE FULLTEXT INDEX {FULLTEXT_INDEX} IF NOT EXISTS FOR (c:Chunk) ON EACH [c.search_text]"
+)
+VECTOR_INDEX_OPTIONS = "SHOW VECTOR INDEXES YIELD name, options WHERE name = $name RETURN options"
+
+ARTICLES_WITHOUT_CHUNKS = """
+MATCH (a:Article)
+WHERE NOT EXISTS { (:Chunk)-[:PART_OF]->(a) }
+RETURN a ORDER BY a.arxiv_id
+"""
+
+UPSERT_CHUNKS = """
+UNWIND $rows AS row
+MATCH (a:Article {arxiv_id: row.arxiv_id})
+MERGE (c:Chunk {key: row.key})
+SET c.arxiv_id = row.arxiv_id,
+    c.position = row.position,
+    c.text = row.text,
+    c.search_text = row.search_text,
+    c.embedding = row.embedding
+MERGE (c)-[:PART_OF]->(a)
+"""
+
+
+def _article(node: Any) -> Article:
+    return Article(
+        arxiv_id=node["arxiv_id"],
+        title=node["title"],
+        abstract=node["abstract"],
+        published=node["published"].to_native(),
+        categories=tuple(node.get("categories") or ()),
+        author_names=tuple(node.get("author_names") or ()),
+    )
 
 
 def _chunks(rows: Sequence[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
@@ -123,6 +184,54 @@ class Neo4jStore:
             authored_by=record["authored_by"],
             cites=record["cites"],
         )
+
+    def ensure_chunk_schema(self, dimensions: int) -> None:
+        if type(dimensions) is not int or dimensions < 1:
+            raise ValueError(f"dimensions must be a positive integer, got {dimensions!r}")
+        with self._driver.session() as session:
+            session.run(CHUNK_KEY_CONSTRAINT).consume()
+            session.run(create_vector_index(dimensions)).consume()
+            session.run(CREATE_FULLTEXT_INDEX).consume()
+            record = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single()
+        if record is None:
+            raise RuntimeError(f"vector index {VECTOR_INDEX} was not created")
+        existing = record["options"]["indexConfig"]["vector.dimensions"]
+        if existing != dimensions:
+            raise ValueError(
+                f"vector index {VECTOR_INDEX} has {existing} dimensions, the embedder has "
+                f"{dimensions}: drop the index and the chunks, then index again"
+            )
+
+    def articles_without_chunks(self, limit: int | None = None) -> list[Article]:
+        query = ARTICLES_WITHOUT_CHUNKS + (" LIMIT $limit" if limit is not None else "")
+        with self._driver.session() as session:
+            return [_article(record["a"]) for record in session.run(query, limit=limit)]
+
+    def upsert_chunks(self, chunks: Sequence[IndexedChunk]) -> None:
+        rows = [
+            {
+                "key": c.key,
+                "arxiv_id": c.chunk.arxiv_id,
+                "position": c.chunk.position,
+                "text": c.chunk.text,
+                "search_text": c.search_text,
+                "embedding": list(c.embedding),
+            }
+            for c in chunks
+        ]
+        if not rows:
+            return
+
+        def write(tx: neo4j.ManagedTransaction) -> None:
+            tx.run(UPSERT_CHUNKS, rows=rows).consume()
+
+        with self._driver.session() as session:
+            session.execute_write(write)  # one transaction: an article is never half indexed
+
+    def chunk_count(self) -> int:
+        with self._driver.session() as session:
+            record = session.run("MATCH (c:Chunk) RETURN count(c) AS n").single()
+        return 0 if record is None else int(record["n"])
 
     def _write(self, query: str, rows: Sequence[dict[str, Any]]) -> None:
         def run_chunk(tx: neo4j.ManagedTransaction, chunk: list[dict[str, Any]]) -> None:
