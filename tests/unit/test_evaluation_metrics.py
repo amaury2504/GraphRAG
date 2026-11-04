@@ -1,15 +1,18 @@
 import math
+import statistics
 
 import pytest
 
 from graphrag.domain.evaluation import (
     QUESTION_TYPES,
+    SPLITS,
     EvalQuestion,
     check_unique_ids,
     ndcg_at_k,
     parse_question,
     recall_at_k,
     reciprocal_rank,
+    split_of,
     summarize,
 )
 
@@ -273,3 +276,51 @@ def test_an_unanswerable_question_has_no_expected_article() -> None:
 def test_graded_fields_are_validated(overrides: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         parse_question(raw(**overrides))
+
+
+# --- detectable gap and the tune/report split ---------------------------------------------
+
+
+def test_summary_carries_the_sample_standard_deviation() -> None:
+    values = [0.0, 1.0, 0.0, 1.0]
+    assert summarize(values).stdev == pytest.approx(statistics.stdev(values))
+    assert summarize([0.5]).stdev == 0.0
+    assert summarize([]).stdev == 0.0
+
+
+def test_detectable_gap_is_about_two_point_eight_standard_errors() -> None:
+    summary = summarize([0.0, 1.0, 0.0, 1.0])  # stdev 0.5774, n 4
+    assert summary.detectable_gap == pytest.approx(2.8 * 0.5773502691896257 / 2)
+
+
+def test_detectable_gap_shrinks_with_more_questions_and_is_zero_without_spread() -> None:
+    few = summarize([0.0, 1.0] * 5)
+    many = summarize([0.0, 1.0] * 50)
+    assert few.detectable_gap is not None
+    assert many.detectable_gap is not None
+    assert many.detectable_gap < few.detectable_gap
+    assert summarize([0.5, 0.5, 0.5]).detectable_gap == 0.0
+
+
+def test_detectable_gap_is_unknown_below_two_questions() -> None:
+    assert summarize([1.0]).detectable_gap is None
+    assert summarize([]).detectable_gap is None
+
+
+def test_split_is_stable_and_one_of_two_halves() -> None:
+    assert split_of("factual-01") == split_of("factual-01")
+    assert {split_of(f"q{i}") for i in range(50)} == set(SPLITS)
+
+
+def test_split_is_roughly_balanced() -> None:
+    tune = sum(split_of(f"q{i}") == "tune" for i in range(200))
+    assert 80 <= tune <= 120
+
+
+def test_split_depends_on_the_id_alone() -> None:
+    # pinned values: changing the rule would silently move questions between the halves
+    assert [split_of(i) for i in ("factual-01", "factual-02", "comparative-01")] == [
+        "report",
+        "report",
+        "tune",
+    ]

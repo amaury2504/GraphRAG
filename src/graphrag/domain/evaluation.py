@@ -1,5 +1,6 @@
 """Evaluation questions and retrieval metrics (recall@k, MRR) with bootstrap intervals."""
 
+import hashlib
 import math
 import random
 import statistics
@@ -152,6 +153,19 @@ def reciprocal_rank(groups: Sequence[frozenset[str]], retrieved: Sequence[str]) 
     return 0.0
 
 
+SPLITS = ("tune", "report")
+
+
+def split_of(question_id: str) -> str:
+    """ "tune" or "report": any setting (RRF constant, analyzer...) is chosen on the first half
+    and reported on the second, so the reported figure is not tuned to the questions.
+
+    Decided by the id alone, so adding questions never moves an existing one. With few
+    questions the halves can be uneven.
+    """
+    return SPLITS[hashlib.sha256(question_id.encode()).digest()[0] % 2]
+
+
 EXPECTED_GRADE = 2  # an article the question was written from
 ALSO_RELEVANT_GRADE = 1  # another article a person judged relevant
 
@@ -191,12 +205,27 @@ def ndcg_at_k(
 
 @dataclass(frozen=True, slots=True)
 class Summary:
-    """Mean of per-question values with a 95% bootstrap interval."""
+    """Mean of per-question values with a 95% bootstrap interval, and their spread."""
 
     mean: float
     low: float
     high: float
     n: int
+    stdev: float = 0.0  # sample standard deviation of the per-question values (0 if n < 2)
+
+    @property
+    def detectable_gap(self) -> float | None:
+        """Smallest mean gap this many questions can reliably show (80% power, 5% level).
+
+        Meant for summaries of paired per-question differences: about 2.8 standard errors,
+        from the observed spread (itself rough on few questions). None below 2 questions.
+        """
+        if self.n < 2:
+            return None
+        return DETECTABLE_STANDARD_ERRORS * self.stdev / math.sqrt(self.n)
+
+
+DETECTABLE_STANDARD_ERRORS = 1.96 + 0.84  # z for a 5% two-sided level + z for 80% power
 
 
 def summarize(values: Sequence[float], *, resamples: int = 2000, seed: int = 0) -> Summary:
@@ -211,4 +240,4 @@ def summarize(values: Sequence[float], *, resamples: int = 2000, seed: int = 0) 
     means = sorted(statistics.fmean(rng.choices(values, k=n)) for _ in range(resamples))
     low = means[int(0.025 * resamples)]
     high = means[min(int(0.975 * resamples), resamples - 1)]
-    return Summary(mean, low, high, n)
+    return Summary(mean, low, high, n, statistics.stdev(values))

@@ -21,7 +21,7 @@ from graphrag.adapters.sentence_transformer import (
     default_index_info,
     load_default_embedder,
 )
-from graphrag.domain.evaluation import EvalQuestion, Summary
+from graphrag.domain.evaluation import SPLITS, EvalQuestion, Summary, split_of
 from graphrag.pipeline.evaluation import (
     DEFAULT_KS,
     NDCG_K,
@@ -47,9 +47,14 @@ MIN_QUESTIONS_FOR_STAR = 10
 
 
 def select_questions(
-    questions: Sequence[EvalQuestion], include_unvalidated: bool
+    questions: Sequence[EvalQuestion], include_unvalidated: bool, split: str | None = None
 ) -> list[EvalQuestion]:
-    return [q for q in questions if include_unvalidated or q.validated]
+    """Validated questions (or all), optionally only one half: see `split_of`."""
+    return [
+        q
+        for q in questions
+        if (include_unvalidated or q.validated) and (split is None or split_of(q.id) == split)
+    ]
 
 
 def format_table(name: str, summaries: Mapping[str, GroupSummary], ks: Sequence[int]) -> str:
@@ -91,6 +96,13 @@ def format_differences(
         focus_cell = _interval(metrics[focus], n)
         ndcg_cell = _interval(metrics[f"ndcg@{NDCG_K}"], n)
         lines.append(f"{group:<12}{n:>4}  {mrr_cell:<26}{focus_cell:<26}{ndcg_cell:<26}")
+    gaps = {g: m[focus].detectable_gap for g, m in differences.items()}
+    shown = ", ".join(f"{g} ±{gap:.2f}" for g, gap in gaps.items() if gap is not None)
+    if shown:
+        lines.append(
+            f"Smallest {focus} gap these questions can reliably show (80% power): {shown}. "
+            "Smaller gaps cannot be told from chance."
+        )
     lines.append(
         "* = the interval excludes 0; otherwise the gap may be chance. "
         f"Never starred under {MIN_QUESTIONS_FOR_STAR} questions: the interval is then too narrow."
@@ -98,8 +110,15 @@ def format_differences(
     return "\n".join(lines)
 
 
-def _summary_json(summary: Summary) -> dict[str, float | int]:
-    return {"mean": summary.mean, "low": summary.low, "high": summary.high, "n": summary.n}
+def _summary_json(summary: Summary) -> dict[str, float | int | None]:
+    return {
+        "mean": summary.mean,
+        "low": summary.low,
+        "high": summary.high,
+        "n": summary.n,
+        "stdev": summary.stdev,
+        "detectable_gap": summary.detectable_gap,
+    }
 
 
 def build_report(
@@ -109,6 +128,7 @@ def build_report(
     *,
     include_unvalidated: bool,
     now: datetime,
+    split: str | None = None,
 ) -> dict[str, Any]:
     names = list(results)
     configs: dict[str, Any] = {}
@@ -137,6 +157,7 @@ def build_report(
     return {
         "created": now.isoformat(timespec="seconds"),
         "provisional": include_unvalidated,
+        "split": split or "all",
         "questions": len(questions),
         "ks": list(ks),
         "settings": {
@@ -156,11 +177,16 @@ def render(
     ks: Sequence[int],
     *,
     include_unvalidated: bool,
+    split: str | None = None,
 ) -> str:
     names = list(results)
     parts = []
     if include_unvalidated:
         parts.append("PROVISIONAL: unvalidated questions are included.")
+    if split == "tune":
+        parts.append("TUNING HALF: choose settings here, never quote these figures as results.")
+    elif split == "report":
+        parts.append("REPORT HALF: do not change any setting after seeing these figures.")
     parts.append(f"{len(questions)} questions")
     for name in names:
         parts.append(format_table(name, summarize_results(results[name], ks), ks))
@@ -182,6 +208,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--ks", type=int, nargs="+", default=list(DEFAULT_KS))
     parser.add_argument("--include-unvalidated", action="store_true")
     parser.add_argument(
+        "--split",
+        choices=SPLITS,
+        default=None,
+        help="only one half of the questions: choose settings on 'tune', report on 'report'",
+    )
+    parser.add_argument(
         "--with-keyword",
         action="store_true",
         help="also evaluate keyword-only search (diagnostic: what each half brings to the fusion)",
@@ -192,7 +224,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    questions = select_questions(read_questions(args.questions), args.include_unvalidated)
+    questions = select_questions(
+        read_questions(args.questions), args.include_unvalidated, args.split
+    )
     if not questions:
         print("No validated question to evaluate (use --include-unvalidated for a trial run).")
         return 1
@@ -210,10 +244,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             retrievers["keyword"] = KeywordRetriever(store)
         ks = sorted(set(args.ks))
         results = evaluate_retrieval(questions, retrievers, ks)
-    print(render(questions, results, ks, include_unvalidated=args.include_unvalidated))
+    print(
+        render(
+            questions, results, ks, include_unvalidated=args.include_unvalidated, split=args.split
+        )
+    )
     now = datetime.now(UTC)
     report = build_report(
-        questions, results, ks, include_unvalidated=args.include_unvalidated, now=now
+        questions,
+        results,
+        ks,
+        include_unvalidated=args.include_unvalidated,
+        now=now,
+        split=args.split,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     path = args.output_dir / f"retrieval_{now:%Y%m%d_%H%M%S}.json"

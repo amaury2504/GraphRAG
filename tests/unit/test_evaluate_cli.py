@@ -10,7 +10,7 @@ from graphrag.cli.evaluate import (
     render,
     select_questions,
 )
-from graphrag.domain.evaluation import EvalQuestion
+from graphrag.domain.evaluation import EvalQuestion, split_of
 from graphrag.domain.models import SearchHit
 from graphrag.pipeline.evaluation import (
     evaluate_retrieval,
@@ -174,3 +174,91 @@ def test_report_is_json_with_settings_for_reproducibility() -> None:
     assert per_question["recall"] == {"1": 0.0, "3": 1.0}
     assert "hybrid minus vector" in decoded["differences"]
     assert decoded["differences"]["hybrid minus vector"]["all"]["mrr"]["n"] == 3
+
+
+def test_a_split_keeps_only_that_half_and_questions_never_move() -> None:
+    questions = [q(f"q{i}", "factual", "A") for i in range(40)]
+    tune = select_questions(questions, False, "tune")
+    report = select_questions(questions, False, "report")
+    assert {x.id for x in tune} | {x.id for x in report} == {x.id for x in questions}
+    assert not {x.id for x in tune} & {x.id for x in report}
+    assert all(split_of(x.id) == "tune" for x in tune)
+    assert all(split_of(x.id) == "report" for x in report)
+    assert tune
+    assert report
+    assert {x.id for x in select_questions(questions[:20], False, "tune")} <= {x.id for x in tune}
+    assert len(select_questions(questions, False)) == 40
+
+
+def test_the_split_applies_on_top_of_validation() -> None:
+    mixed = [q(f"q{i}", "factual", "A", validated=i % 2 == 0) for i in range(40)]
+    assert all(x.validated for x in select_questions(mixed, False, "tune"))
+    assert any(not x.validated for x in select_questions(mixed, True, "tune"))
+
+
+def test_differences_state_the_smallest_gap_that_can_be_shown() -> None:
+    questions = [q(f"f{i}", "factual", "A") for i in range(12)]
+    script_a = {f"f{i}?": (["A"] if i % 2 else ["x"]) for i in range(12)}
+    script_b = {f"f{i}?": (["A"] if i % 3 else ["x"]) for i in range(12)}
+    results = evaluate_retrieval(
+        questions, {"a": Scripted(script_a), "b": Scripted(script_b)}, (1,), clock=lambda: 0.0
+    )
+    diffs = paired_differences(results["a"], results["b"], (1,))
+    text = format_differences("a", "b", diffs, {"all": 12, "factual": 12}, (1,))
+    line = next(x for x in text.splitlines() if x.startswith("Smallest recall@1 gap"))
+    gap = diffs["all"]["recall@1"].detectable_gap
+    assert gap is not None
+    assert f"all ±{gap:.2f}" in line
+    assert "factual ±" in line
+    assert "cannot be told from chance" in line
+
+
+def test_no_detectable_gap_line_with_a_single_question() -> None:
+    results = evaluate_retrieval(
+        [q("f1", "factual", "A")],
+        {"a": Scripted({"f1?": ["A"]}), "b": Scripted({"f1?": ["x"]})},
+        (1,),
+        clock=lambda: 0.0,
+    )
+    diffs = paired_differences(results["a"], results["b"], (1,))
+    text = format_differences("a", "b", diffs, {"all": 1, "factual": 1}, (1,))
+    assert "Smallest" not in text
+
+
+def test_the_report_names_the_split_and_the_render_warns_about_it() -> None:
+    results = evaluate_retrieval(
+        QUESTIONS,
+        {"vector": Scripted({"f1?": ["A"], "f2?": ["B"], "c1?": ["C", "D"]})},
+        KS,
+        clock=lambda: 0.0,
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    assert (
+        build_report(QUESTIONS, results, KS, include_unvalidated=False, now=now)["split"] == "all"
+    )
+    tuned = build_report(QUESTIONS, results, KS, include_unvalidated=False, now=now, split="tune")
+    assert tuned["split"] == "tune"
+    assert "TUNING HALF" in render(QUESTIONS, results, KS, include_unvalidated=False, split="tune")
+    assert "REPORT HALF" in render(
+        QUESTIONS, results, KS, include_unvalidated=False, split="report"
+    )
+    assert "HALF" not in render(QUESTIONS, results, KS, include_unvalidated=False)
+
+
+def test_the_json_report_carries_the_detectable_gap() -> None:
+    questions = [q(f"f{i}", "factual", "A") for i in range(6)]
+    results = evaluate_retrieval(
+        questions,
+        {
+            "a": Scripted({f"f{i}?": (["A"] if i % 2 else ["x"]) for i in range(6)}),
+            "b": Scripted({f"f{i}?": ["A"] for i in range(6)}),
+        },
+        (1,),
+        clock=lambda: 0.0,
+    )
+    report = build_report(
+        questions, results, (1,), include_unvalidated=False, now=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    entry = report["differences"]["b minus a"]["all"]["recall@1"]
+    assert entry["detectable_gap"] is not None
+    assert entry["stdev"] > 0
