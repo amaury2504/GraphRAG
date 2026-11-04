@@ -56,6 +56,8 @@ tests/
 # lint et types              : uv run ruff check . && uv run ruff format --check . && uv run mypy
 # ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
 #                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
+# indexation (morceaux)      : uv run python -m graphrag.cli.index [--limit N] [--batch-size N]
+#                              (titre + morceau → bge-small → Neo4j ; ne traite que les articles sans morceaux)
 # évaluation                 : (à définir)
 # rapport d'usage            : (à définir)
 ```
