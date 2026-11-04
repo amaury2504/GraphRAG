@@ -1,3 +1,4 @@
+import logging
 import time
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -11,6 +12,8 @@ from graphrag.domain.models import ReferenceRecord
 API_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
 FIELDS = "externalIds,references.externalIds"
 BATCH_SIZE = 100
+
+logger = logging.getLogger(__name__)
 
 
 class SemanticScholarSource:
@@ -60,20 +63,33 @@ class SemanticScholarSource:
 
 
 def parse_batch(arxiv_ids: Sequence[str], payload: list[Any]) -> list[ReferenceRecord]:
-    """Results come back in request order, with null for unknown papers."""
+    """Results come back in request order, with null for unknown papers.
+
+    Semantic Scholar merges papers deposited twice on arXiv into one record that carries
+    one of the two ids: a result whose id differs from the requested one is that alias,
+    and its references are kept under the requested id. Only a result carrying the id of
+    another paper of the same batch means the order is broken.
+    """
     if len(payload) != len(arxiv_ids):
         raise ValueError(f"asked for {len(arxiv_ids)} papers, got {len(payload)} results")
+    batch = set(arxiv_ids)
     records = []
     for requested, item in zip(arxiv_ids, payload, strict=True):
         if item is None:
             continue
-        returned = (item.get("externalIds") or {}).get("ArXiv")
-        if returned is not None and _safe_normalize(returned) != requested:
-            raise ValueError(f"result order mismatch: asked {requested}, got {returned}")
+        raw_returned = (item.get("externalIds") or {}).get("ArXiv")
+        returned = _safe_normalize(raw_returned) if raw_returned else None
+        if returned is not None and returned != requested:
+            if returned in batch:
+                raise ValueError(f"result order mismatch: asked {requested}, got {returned}")
+            logger.warning(
+                "arXiv alias: asked %s, Semantic Scholar returned %s", requested, returned
+            )
+        own_ids = {requested, returned}
         cited: dict[str, None] = {}  # ordered, de-duplicated
         for reference in item.get("references") or []:
             raw = ((reference or {}).get("externalIds") or {}).get("ArXiv")
-            if raw and (cited_id := _safe_normalize(raw)) and cited_id != requested:
+            if raw and (cited_id := _safe_normalize(raw)) and cited_id not in own_ids:
                 cited[cited_id] = None
         records.append(ReferenceRecord(requested, tuple(cited)))
     return records

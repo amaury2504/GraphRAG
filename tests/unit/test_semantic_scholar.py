@@ -65,9 +65,50 @@ def test_length_mismatch_is_an_error() -> None:
 
 
 def test_order_mismatch_is_an_error() -> None:
-    payload = [{"externalIds": {"ArXiv": "2401.00099"}, "references": []}]
+    # the first result carries the id of the second requested paper: the order is broken
+    payload = [
+        {"externalIds": {"ArXiv": "2401.00002"}, "references": []},
+        {"externalIds": {"ArXiv": "2401.00001"}, "references": []},
+    ]
+    with pytest.raises(ValueError, match=r"order mismatch: asked 2401\.00001, got 2401\.00002"):
+        parse_batch(["2401.00001", "2401.00002"], payload)
+
+
+def test_versioned_id_of_another_batch_paper_is_still_a_mismatch() -> None:
+    payload = [
+        {"externalIds": {"ArXiv": "2401.00002v3"}, "references": []},
+        {"externalIds": {"ArXiv": "2401.00001"}, "references": []},
+    ]
     with pytest.raises(ValueError, match="order mismatch"):
+        parse_batch(["2401.00001", "2401.00002"], payload)
+
+
+def test_alias_outside_the_batch_keeps_references_under_requested_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # same work deposited twice on arXiv: Semantic Scholar returns the other id
+    payload = [
+        {
+            "externalIds": {"ArXiv": "2310.00099"},
+            "references": [
+                {"externalIds": {"ArXiv": "2401.00005"}},
+                {"externalIds": {"ArXiv": "2310.00099v2"}},  # its own alias, not a citation
+            ],
+        }
+    ]
+    with caplog.at_level("WARNING", logger="graphrag.adapters.semantic_scholar"):
+        records = parse_batch(["2401.00001"], payload)
+    assert records == [ReferenceRecord("2401.00001", ("2401.00005",))]
+    assert [r.getMessage() for r in caplog.records] == [
+        "arXiv alias: asked 2401.00001, Semantic Scholar returned 2310.00099"
+    ]
+
+
+def test_matching_id_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    payload = [{"externalIds": {"ArXiv": "2401.00001v2"}, "references": []}]
+    with caplog.at_level("WARNING", logger="graphrag.adapters.semantic_scholar"):
         parse_batch(["2401.00001"], payload)
+    assert caplog.records == []
 
 
 class Env:
