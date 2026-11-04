@@ -388,6 +388,29 @@ def test_candidates_report_vague_and_declined_groups_and_keep_the_rest() -> None
     assert len(llm.prompts) == 4
 
 
+def test_excluded_articles_and_their_twins_are_never_chosen() -> None:
+    twins = [art(n, title="Topic 1" if n in (1, 2) else None) for n in range(40)]
+    excluded = {"2501.00001", *(f"2501.{n:05d}" for n in range(10, 20))}
+    plans = plan_questions(
+        twins, FakeSearch(40), FakeEmbedder(), per_type=3, seed=5, exclude=excluded
+    )
+    chosen = {a.arxiv_id for p in plans for a in p.articles}
+    assert chosen
+    assert not chosen & excluded
+    assert "2501.00002" not in chosen  # twin of an excluded article
+
+
+def test_unknown_excluded_ids_are_ignored() -> None:
+    assert plan(per_type=1) == plan_questions(
+        CORPUS, FakeSearch(40), FakeEmbedder(), per_type=1, seed=7, exclude={"9999.99999"}
+    )
+
+
+def test_prompt_asks_to_flag_inferences_and_incomparable_figures() -> None:
+    assert "the abstracts do not" in SYSTEM_PROMPT
+    assert "whether they measure the\n  same thing" in SYSTEM_PROMPT
+
+
 def test_planning_can_be_limited_to_some_types() -> None:
     plans = plan(per_type=2, types=("comparative", "evolutive"))
     assert [p.type for p in plans] == ["comparative"] * 2 + ["evolutive"] * 2

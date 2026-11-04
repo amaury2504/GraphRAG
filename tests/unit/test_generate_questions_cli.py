@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from graphrag.cli.generate_questions import MAX_WITHOUT_CONFIRMATION, check_request
+from graphrag.cli.generate_questions import MAX_WITHOUT_CONFIRMATION, check_request, used_articles
+from graphrag.domain.evaluation import EvalQuestion
 
 
 def test_the_first_batch_size_is_eight_questions() -> None:
@@ -45,3 +46,12 @@ def test_the_cost_counts_only_the_requested_types(tmp_path: Path) -> None:
     assert "9 questions means 9 LLM calls" in message
     assert check_request(8, 1, False, output, False) is None  # exactly the limit
     assert check_request(9, 1, False, output, False) is not None
+
+
+def test_used_articles_include_equivalent_ids() -> None:
+    questions = [
+        EvalQuestion("a", "factual", "q", "a", ("2401.00001",), {"2401.00001": ("2402.00009",)}),
+        EvalQuestion("b", "comparative", "q", "a", ("2401.00002", "2401.00003")),
+    ]
+    assert used_articles(questions) == {"2401.00001", "2402.00009", "2401.00002", "2401.00003"}
+    assert used_articles([]) == set()

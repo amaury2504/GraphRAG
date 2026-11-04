@@ -11,7 +11,7 @@ import json
 import random
 import re
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain, zip_longest
 from typing import Any, cast
@@ -42,7 +42,10 @@ Rules:
   "the paper" or "both systems": a reader who has not seen the articles must know what is meant.
 - It must need the content of ALL the given articles, and be answerable from them alone.
 - Do not copy long phrases from the abstracts; keep the proper names.
-- The expected answer is 2 to 4 sentences, using only facts stated in the abstracts.
+- The expected answer is 2 to 4 sentences, using only facts stated in the abstracts. If it
+  links the articles in a way the abstracts do not state, it says so ("the abstracts do not
+  say..."). If it quotes figures from different articles, it says whether they measure the
+  same thing.
 - Write in English.
 - If the articles share no specific subject that one precise question could be about, do not
   force a link: reply {"skip": "<one sentence saying why>"} instead.
@@ -112,16 +115,23 @@ def plan_questions(
     per_type: int,
     seed: int,
     types: Sequence[QuestionType] = QUESTION_TYPES,
+    exclude: Collection[str] = (),
     min_words: int = MIN_WORDS,
     min_span_days: int = MIN_SPAN_DAYS,
 ) -> list[QuestionPlan]:
-    """Choose `per_type` groups of articles for each of `types`, never reusing an article."""
+    """Choose `per_type` groups of articles for each of `types`, never reusing an article.
+
+    Articles in `exclude` (already asked about), and their twin deposits, are never chosen.
+    """
     rng = random.Random(seed)
     by_id = {a.arxiv_id: a for a in articles}
     same_title = title_groups(articles)
     eligible = [a for a in articles if len(a.abstract.split()) >= min_words]
     eligible_set = set(eligible)
     used: set[str] = set()
+    for arxiv_id in exclude:  # the article and its twin deposits
+        if arxiv_id in by_id:
+            used.update(same_title[normalized_title(by_id[arxiv_id])])
 
     def usable(article: Article) -> bool:
         return article.arxiv_id not in used and article in eligible_set

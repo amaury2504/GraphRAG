@@ -12,10 +12,15 @@ from pathlib import Path
 
 from graphrag.adapters.mistral import MistralLLM, mistral_client
 from graphrag.adapters.neo4j_store import Neo4jStore
-from graphrag.adapters.question_file import CANDIDATES_PATH, write_records
+from graphrag.adapters.question_file import (
+    CANDIDATES_PATH,
+    DEFAULT_PATH,
+    read_questions,
+    write_records,
+)
 from graphrag.adapters.sentence_transformer import load_default_embedder
 from graphrag.cli.ingest import log_line
-from graphrag.domain.evaluation import QUESTION_TYPES
+from graphrag.domain.evaluation import QUESTION_TYPES, EvalQuestion
 from graphrag.pipeline.question_generation import (
     generate_candidates,
     plan_questions,
@@ -25,6 +30,15 @@ from graphrag.pipeline.usage import MeteredLLM, UsageMeter
 from graphrag.settings import Settings
 
 MAX_WITHOUT_CONFIRMATION = 8  # questions: the user fixes the size of the first batch
+
+
+def used_articles(questions: Sequence[EvalQuestion]) -> set[str]:
+    """Every article (and equivalent id) that existing questions already ask about."""
+    used: set[str] = set()
+    for question in questions:
+        for group in question.groups:
+            used.update(group)
+    return used
 
 
 def check_request(
@@ -59,6 +73,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="question types to generate (default: all four)",
     )
     parser.add_argument("--output", type=Path, default=CANDIDATES_PATH)
+    parser.add_argument(
+        "--exclude-questions",
+        type=Path,
+        default=DEFAULT_PATH,
+        help="never reuse the articles of these questions (skipped if the file is missing)",
+    )
     parser.add_argument("--force", action="store_true", help="overwrite the output file")
     parser.add_argument("--confirm-cost", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="choose the articles, call no LLM")
@@ -84,8 +104,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     ) as store:
         articles = store.all_articles()
+        existing = read_questions(args.exclude_questions) if args.exclude_questions.exists() else []
+        exclude = used_articles(existing)
+        log_line(f"{len(exclude)} articles excluded: already used by {len(existing)} questions")
         plans = plan_questions(
-            articles, store, embedder, per_type=args.per_type, seed=args.seed, types=args.types
+            articles,
+            store,
+            embedder,
+            per_type=args.per_type,
+            seed=args.seed,
+            types=args.types,
+            exclude=exclude,
         )
     for plan in plans:
         log_line(
