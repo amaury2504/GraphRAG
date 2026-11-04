@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from graphrag.adapters.health import Neo4jProbe, PostgresProbe
 from graphrag.adapters.http import RequestFailedError
-from graphrag.domain.models import Answer, SearchHit
+from graphrag.domain.models import Answer, SearchHit, Timings
 from graphrag.pipeline.answer import DEFAULT_K, QuestionAnswerer
 from graphrag.ports.health import HealthProbe
 from graphrag.settings import Settings
@@ -29,7 +29,7 @@ class AskRequest(BaseModel):
     question: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)
     ]
-    mode: Literal["vector", "hybrid"] = "hybrid"
+    configuration: Literal["vector", "hybrid"] = "hybrid"
     k: int = Field(default=DEFAULT_K, ge=1, le=10, description="number of articles retrieved")
 
 
@@ -50,19 +50,34 @@ class UsageOut(BaseModel):
     total_tokens: int
 
 
+class TimingsOut(BaseModel):
+    retrieval_seconds: float
+    llm_seconds: float
+    total_seconds: float
+
+    @classmethod
+    def of(cls, timings: Timings) -> TimingsOut:
+        return cls(
+            retrieval_seconds=timings.retrieval_seconds,
+            llm_seconds=timings.llm_seconds,
+            total_seconds=timings.total_seconds,
+        )
+
+
 class AskResponse(BaseModel):
     question: str
-    mode: Literal["vector", "hybrid"]
+    configuration: Literal["vector", "hybrid"]
     answer: str
     citations: list[SourceOut]
     retrieved: list[SourceOut]
     usage: UsageOut
+    timings: TimingsOut
 
     @classmethod
-    def of(cls, answer: Answer, mode: Literal["vector", "hybrid"]) -> AskResponse:
+    def of(cls, answer: Answer, configuration: Literal["vector", "hybrid"]) -> AskResponse:
         return cls(
             question=answer.question,
-            mode=mode,
+            configuration=configuration,
             answer=answer.text,
             citations=[SourceOut.of(h) for h in answer.citations],
             retrieved=[SourceOut.of(h) for h in answer.retrieved],
@@ -71,6 +86,7 @@ class AskResponse(BaseModel):
                 completion_tokens=answer.usage.completion_tokens,
                 total_tokens=answer.usage.total_tokens,
             ),
+            timings=TimingsOut.of(answer.timings),
         )
 
 
@@ -104,13 +120,13 @@ def create_app(
         except NotConfiguredError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
         try:
-            answer = question_answerer.ask(request.question, request.mode, request.k)
+            answer = question_answerer.ask(request.question, request.configuration, request.k)
         except RequestFailedError, ValueError:
             logger.exception("the language model call failed")
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY, "the language model is unavailable"
             ) from None
-        return AskResponse.of(answer, request.mode)
+        return AskResponse.of(answer, request.configuration)
 
     return app
 

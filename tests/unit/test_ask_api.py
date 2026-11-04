@@ -39,9 +39,11 @@ class FakeLLM:
 
 
 def client(*, error: Exception | None = None, retriever: FakeRetriever | None = None) -> TestClient:
+    ticks = iter([10.0, 10.5, 12.5])  # start, retrieved, answered
     qa = QuestionAnswerer(
         {"vector": retriever or FakeRetriever(), "hybrid": retriever or FakeRetriever()},
         FakeLLM(error),
+        clock=lambda: next(ticks),
     )
     return TestClient(create_app([], lambda: qa), raise_server_exceptions=False)
 
@@ -51,7 +53,7 @@ def test_ask_returns_answer_citations_sources_and_usage() -> None:
     assert response.status_code == 200
     assert response.json() == {
         "question": "What works?",
-        "mode": "hybrid",
+        "configuration": "hybrid",
         "answer": "It works [arXiv:2401.00002].",
         "citations": [
             {"arxiv_id": "2401.00002", "title": "Title 2", "position": 1, "text": "chunk 2"}
@@ -61,16 +63,17 @@ def test_ask_returns_answer_citations_sources_and_usage() -> None:
             {"arxiv_id": "2401.00002", "title": "Title 2", "position": 1, "text": "chunk 2"},
         ],
         "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+        "timings": {"retrieval_seconds": 0.5, "llm_seconds": 2.0, "total_seconds": 2.5},
     }
 
 
 def test_mode_and_k_reach_the_retriever() -> None:
     retriever = FakeRetriever()
     response = client(retriever=retriever).post(
-        "/ask", json={"question": "  q  ", "mode": "vector", "k": 7}
+        "/ask", json={"question": "  q  ", "configuration": "vector", "k": 7}
     )
     assert response.status_code == 200
-    assert response.json()["mode"] == "vector"
+    assert response.json()["configuration"] == "vector"
     assert retriever.calls == [("q", 7)]  # the question is trimmed
 
 
@@ -81,7 +84,7 @@ def test_mode_and_k_reach_the_retriever() -> None:
         {"question": ""},
         {"question": "   "},
         {"question": "x" * 2001},
-        {"question": "q", "mode": "graph"},
+        {"question": "q", "configuration": "graph"},
         {"question": "q", "k": 0},
         {"question": "q", "k": 11},
         {"question": "q", "k": "many"},

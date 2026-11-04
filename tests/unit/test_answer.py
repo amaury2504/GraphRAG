@@ -132,3 +132,23 @@ def test_hybrid_fusion_keeps_the_abstract() -> None:
     a = SearchHit("2401.00001", "T", 0, "chunk", 0.1, "whole abstract")
     (fused,) = rrf_fuse([[a]])
     assert fused.abstract == "whole abstract"
+
+
+def test_timings_split_retrieval_and_llm_time() -> None:
+    ticks = iter([1.0, 1.25, 3.25])
+    qa = QuestionAnswerer(
+        {"m": FakeRetriever(SOURCES)}, FakeLLM("A [1]."), clock=lambda: next(ticks)
+    )
+    timings = qa.ask("q", "m").timings
+    assert (timings.retrieval_seconds, timings.llm_seconds, timings.total_seconds) == (
+        0.25,
+        2.0,
+        2.25,
+    )
+
+
+def test_no_source_means_no_llm_time() -> None:
+    ticks = iter([1.0, 1.5])
+    qa = QuestionAnswerer({"m": FakeRetriever([])}, FakeLLM("x"), clock=lambda: next(ticks))
+    timings = qa.ask("q", "m").timings
+    assert (timings.retrieval_seconds, timings.llm_seconds) == (0.5, 0.0)

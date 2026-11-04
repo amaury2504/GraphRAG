@@ -1,9 +1,10 @@
 """Write an answer from retrieved articles, with citations checked against those articles."""
 
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 
-from graphrag.domain.models import Answer, SearchHit, Usage
+from graphrag.domain.models import Answer, SearchHit, Timings, Usage
 from graphrag.ports.llm import LLM
 from graphrag.ports.retrieval import Retriever
 
@@ -63,9 +64,15 @@ def resolve_citations(text: str, sources: Sequence[SearchHit]) -> tuple[str, tup
 class QuestionAnswerer:
     """retrieve -> write the answer -> check the citations. A fixed sequence of calls."""
 
-    def __init__(self, retrievers: Mapping[str, Retriever], llm: LLM) -> None:
+    def __init__(
+        self,
+        retrievers: Mapping[str, Retriever],
+        llm: LLM,
+        clock: Callable[[], float] = time.perf_counter,
+    ) -> None:
         self._retrievers = dict(retrievers)
         self._llm = llm
+        self._clock = clock
 
     @property
     def modes(self) -> list[str]:
@@ -74,9 +81,22 @@ class QuestionAnswerer:
     def ask(self, question: str, mode: str, k: int = DEFAULT_K) -> Answer:
         if mode not in self._retrievers:
             raise ValueError(f"unknown mode {mode!r}, expected one of {self.modes}")
+        start = self._clock()
         sources = self._retrievers[mode].retrieve(question, k)
+        retrieved_at = self._clock()
+        retrieval_seconds = retrieved_at - start
         if not sources:
-            return Answer(question, NO_SOURCE_ANSWER, (), (), Usage())
+            return Answer(
+                question, NO_SOURCE_ANSWER, (), (), Usage(), Timings(retrieval_seconds, 0.0)
+            )
         completion = self._llm.complete(SYSTEM_PROMPT, build_prompt(question, sources))
+        llm_seconds = self._clock() - retrieved_at
         text, citations = resolve_citations(completion.text, sources)
-        return Answer(question, text, citations, tuple(sources), completion.usage)
+        return Answer(
+            question,
+            text,
+            citations,
+            tuple(sources),
+            completion.usage,
+            Timings(retrieval_seconds, llm_seconds),
+        )

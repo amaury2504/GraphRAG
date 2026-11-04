@@ -216,7 +216,7 @@ uv run python -m graphrag.cli.generate_questions --types factual comparative --p
 ```
 
 - Dans Git Bash, charger `.env` avec `set -a && . ./.env && set +a`.
-- `POST /ask {"question": "...", "mode": "vector" | "hybrid", "k": 5}` ; documentation interactive sur `/docs`.
+- `POST /ask {"question": "...", "configuration": "vector" | "hybrid", "k": 5}` (la réponse contient `timings`) ; documentation interactive sur `/docs`.
 - Corpus complet : `cli.ingest` (fenêtre par défaut = 365 jours), rejouable sans doublon. `cli.index` ne traite que les articles sans morceaux. Demander l'accord avant de relancer l'ingestion.
 
 ## 8. Code : où est quoi

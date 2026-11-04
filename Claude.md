@@ -58,7 +58,7 @@ tests/
 #                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
 # indexation (morceaux)      : uv run python -m graphrag.cli.index [--limit N] [--batch-size N]
 #                              (titre + morceau → bge-small → Neo4j ; ne traite que les articles sans morceaux)
-# question (API)             : POST /ask {"question": "...", "mode": "vector"|"hybrid", "k": 5}
+# question (API)             : POST /ask {"question": "...", "configuration": "vector"|"hybrid", "k": 5}  (réponse : + timings)
 #                              (nécessite MISTRAL_API_KEY ; modèle chargé au 1er appel ; doc interactive sur /docs)
 # questions candidates       : uv run python -m graphrag.cli.generate_questions [--per-type 2] [--seed 42] [--style named|descriptive] [--dry-run]
 #                              (descriptive : une question qui reprend un mot rare du titre est réécrite une fois, sinon rejetée)

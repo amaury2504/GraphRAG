@@ -71,6 +71,18 @@ class Completion:
 
 
 @dataclass(frozen=True, slots=True)
+class Timings:
+    """Seconds spent in each stage of answering a question."""
+
+    retrieval_seconds: float = 0.0
+    llm_seconds: float = 0.0
+
+    @property
+    def total_seconds(self) -> float:
+        return self.retrieval_seconds + self.llm_seconds
+
+
+@dataclass(frozen=True, slots=True)
 class Answer:
     """A written answer. `citations` are the sources the text cites, in order of first mention."""
 
@@ -79,6 +91,7 @@ class Answer:
     citations: tuple[SearchHit, ...]
     retrieved: tuple[SearchHit, ...]
     usage: Usage
+    timings: Timings = Timings()
 
 
 @dataclass(frozen=True, slots=True)
