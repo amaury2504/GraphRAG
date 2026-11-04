@@ -4,18 +4,21 @@ from datetime import date, timedelta
 
 import pytest
 
-from graphrag.domain.evaluation import parse_question
+from graphrag.domain.evaluation import QUESTION_TYPES, QuestionType, parse_question
 from graphrag.domain.models import Article, Completion, SearchHit, Usage
 from graphrag.pipeline.question_generation import (
     SYSTEM_PROMPT,
     QuestionPlan,
+    UnrelatedArticlesError,
     build_prompt,
     choose_group,
+    find_vague_wording,
     generate_candidates,
     parse_generation,
     plan_questions,
     title_groups,
     topic_neighbours,
+    write_question,
 )
 
 WORDS = " ".join(f"word{i}" for i in range(100))
@@ -65,9 +68,16 @@ class FakeSearch:
 CORPUS = [art(n) for n in range(40)]
 
 
-def plan(corpus: list[Article] = CORPUS, **kwargs: int) -> list[QuestionPlan]:
-    options = {"per_type": 2, "seed": 7, **kwargs}
-    return plan_questions(corpus, FakeSearch(len(corpus)), FakeEmbedder(), **options)
+def plan(
+    corpus: list[Article] = CORPUS,
+    *,
+    per_type: int = 2,
+    seed: int = 7,
+    types: Sequence[QuestionType] = QUESTION_TYPES,
+) -> list[QuestionPlan]:
+    return plan_questions(
+        corpus, FakeSearch(len(corpus)), FakeEmbedder(), per_type=per_type, seed=seed, types=types
+    )
 
 
 def test_topic_neighbours_alternate_meaning_and_keywords_without_duplicates_or_self() -> None:
@@ -192,9 +202,10 @@ def test_evolutive_prompt_says_articles_are_oldest_first() -> None:
     assert "listed from the earliest to the latest" in prompt
 
 
-def test_system_prompt_demands_standalone_paraphrased_json() -> None:
-    assert "self-contained" in SYSTEM_PROMPT
-    assert "Paraphrase" in SYSTEM_PROMPT
+def test_system_prompt_demands_named_standalone_questions_json_and_allows_a_skip() -> None:
+    assert "self-contained and NAME what it asks about" in SYSTEM_PROMPT
+    assert '"these works", "the two approaches"' in SYSTEM_PROMPT
+    assert '{"skip": ' in SYSTEM_PROMPT
     assert "JSON object only" in SYSTEM_PROMPT
 
 
@@ -208,6 +219,11 @@ def test_system_prompt_demands_standalone_paraphrased_json() -> None:
 )
 def test_parse_generation_accepts_noisy_replies(reply: str) -> None:
     assert parse_generation(reply) == ("Q?", "A.")
+
+
+def test_the_model_may_decline_an_unrelated_group() -> None:
+    with pytest.raises(UnrelatedArticlesError, match="no specific shared subject: unrelated"):
+        parse_generation('{"skip": "unrelated"}')
 
 
 @pytest.mark.parametrize(
@@ -285,3 +301,93 @@ def test_a_twin_deposit_is_recorded_as_an_equivalent() -> None:
 def test_title_groups_ignore_case_and_spacing() -> None:
     groups = title_groups([art(1, title="A  B"), art(2, title="a b"), art(3, title="C")])
     assert groups == {"a b": ["2501.00001", "2501.00002"], "c": ["2501.00003"]}
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("How do these works differ?", "these works"),
+        ("How do those two approaches compare?", "those two approaches"),
+        ("What do the two systems share?", "the two"),
+        ("Why did the first approach fail?", "the first approach"),
+        ("What is the second article about?", "the second article"),
+        ("What does this paper propose?", "this paper"),
+        ("Does the study report gains?", "the study"),
+        ("Which of both approaches is faster?", "both approaches"),
+        ("HOW DO THESE METHODS DIFFER?", "THESE METHODS"),
+    ],
+)
+def test_vague_wording_is_found(question: str, expected: str) -> None:
+    assert find_vague_wording(question) == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "How does LiveRAG differ from query-agnostic RAG evaluation?",
+        "What does the first-stage retriever of CodeTeam return?",
+        "Which two datasets does GRaSP use?",
+        "How do recent approaches to agent memory differ?",
+        "What is the second step of the TRATE pipeline?",
+        "",
+    ],
+)
+def test_specific_questions_are_not_flagged(question: str) -> None:
+    assert find_vague_wording(question) is None
+
+
+VAGUE = '{"question": "How do the two approaches differ?", "expected_answer": "A."}'
+NAMED = '{"question": "How does LiveRAG differ from CodeTeam?", "expected_answer": "B."}'
+PAIR = QuestionPlan("comparative", (art(2), art(3)))
+
+
+def test_a_vague_question_is_rewritten_once_with_feedback() -> None:
+    llm = ScriptedLLM([VAGUE, NAMED])
+    assert write_question(PAIR, llm) == ("How does LiveRAG differ from CodeTeam?", "B.")
+    first, second = llm.prompts
+    assert first == (SYSTEM_PROMPT, build_prompt(PAIR))
+    assert second[0] == SYSTEM_PROMPT
+    assert second[1].startswith(build_prompt(PAIR))
+    assert "it says 'the two'" in second[1]
+    assert "naming the specific" in second[1]
+
+
+def test_a_question_still_vague_after_the_rewrite_fails() -> None:
+    llm = ScriptedLLM([VAGUE, VAGUE, NAMED])
+    with pytest.raises(ValueError, match="still vague after a rewrite: 'the two'"):
+        write_question(PAIR, llm)
+    assert len(llm.prompts) == 2  # one rewrite, not more
+
+
+def test_a_good_question_costs_one_call() -> None:
+    llm = ScriptedLLM([NAMED])
+    write_question(PAIR, llm)
+    assert len(llm.prompts) == 1
+
+
+def test_a_declined_group_is_not_retried() -> None:
+    llm = ScriptedLLM(['{"skip": "nothing in common"}', NAMED])
+    with pytest.raises(UnrelatedArticlesError):
+        write_question(PAIR, llm)
+    assert len(llm.prompts) == 1
+
+
+def test_candidates_report_vague_and_declined_groups_and_keep_the_rest() -> None:
+    plans = [
+        PAIR,
+        QuestionPlan("factual", (art(5),)),
+        QuestionPlan("comparative", (art(6), art(7))),
+    ]
+    llm = ScriptedLLM([VAGUE, VAGUE, GOOD, '{"skip": "unrelated"}'])
+    records, failures = generate_candidates(plans, llm, title_groups(CORPUS), log=lambda _m: None)
+    assert [r["id"] for r in records] == ["factual-01"]
+    assert failures == [
+        "comparative on 2501.00002, 2501.00003: still vague after a rewrite: 'the two'",
+        "comparative on 2501.00006, 2501.00007: no specific shared subject: unrelated",
+    ]
+    assert len(llm.prompts) == 4
+
+
+def test_planning_can_be_limited_to_some_types() -> None:
+    plans = plan(per_type=2, types=("comparative", "evolutive"))
+    assert [p.type for p in plans] == ["comparative"] * 2 + ["evolutive"] * 2

@@ -14,7 +14,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain, zip_longest
-from typing import Any
+from typing import Any, cast
 
 from graphrag.domain.chunking import search_text
 from graphrag.domain.evaluation import QUESTION_TYPES, QuestionType
@@ -36,12 +36,17 @@ SYSTEM_PROMPT = """\
 You write evaluation questions for a search system over scientific articles (AI and RAG).
 You are given numbered articles (title, date, abstract). Write ONE question and its expected answer.
 Rules:
-- The question must be self-contained: never mention "the article", "the paper", numbers or authors.
+- The question must be self-contained and NAME what it asks about: use the exact names of the
+  systems, methods, datasets or topics, as written in the titles and abstracts.
+- Never use vague references such as "these works", "the two approaches", "the first article",
+  "the paper" or "both systems": a reader who has not seen the articles must know what is meant.
 - It must need the content of ALL the given articles, and be answerable from them alone.
-- Paraphrase: do not copy the titles or long phrases from the abstracts.
+- Do not copy long phrases from the abstracts; keep the proper names.
 - The expected answer is 2 to 4 sentences, using only facts stated in the abstracts.
 - Write in English.
-Reply with a JSON object only, with the keys "question" and "expected_answer"."""
+- If the articles share no specific subject that one precise question could be about, do not
+  force a link: reply {"skip": "<one sentence saying why>"} instead.
+Reply with a JSON object only: {"question": ..., "expected_answer": ...} or {"skip": ...}."""
 
 TYPE_INSTRUCTIONS: Mapping[str, str] = {
     "factual": "Ask a precise factual question about the method, result or setting of the article.",
@@ -106,10 +111,11 @@ def plan_questions(
     *,
     per_type: int,
     seed: int,
+    types: Sequence[QuestionType] = QUESTION_TYPES,
     min_words: int = MIN_WORDS,
     min_span_days: int = MIN_SPAN_DAYS,
 ) -> list[QuestionPlan]:
-    """Choose `per_type` groups of articles for each question type, never reusing an article."""
+    """Choose `per_type` groups of articles for each of `types`, never reusing an article."""
     rng = random.Random(seed)
     by_id = {a.arxiv_id: a for a in articles}
     same_title = title_groups(articles)
@@ -121,7 +127,7 @@ def plan_questions(
         return article.arxiv_id not in used and article in eligible_set
 
     plans: list[QuestionPlan] = []
-    for kind in QUESTION_TYPES:
+    for kind in types:
         for _ in range(per_type):
             for _attempt in range(MAX_ATTEMPTS):
                 free = [a for a in eligible if usable(a)]
@@ -195,6 +201,10 @@ def build_prompt(plan: QuestionPlan) -> str:
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
+class UnrelatedArticlesError(ValueError):
+    """The model declined: the articles share no subject a precise question could be about."""
+
+
 def parse_generation(text: str) -> tuple[str, str]:
     """Extract (question, expected_answer) from a model reply, tolerating code fences."""
     match = _JSON_OBJECT.search(text)
@@ -206,12 +216,54 @@ def parse_generation(text: str) -> tuple[str, str]:
         raise ValueError(f"invalid JSON in the reply: {exc.msg}") from None
     if not isinstance(data, dict):
         raise ValueError("the reply is not a JSON object")
-    question, answer = data.get("question"), data.get("expected_answer")
+    fields = cast("dict[str, Any]", data)
+    if "skip" in fields:
+        raise UnrelatedArticlesError(f"no specific shared subject: {fields['skip']}")
+    question, answer = fields.get("question"), fields.get("expected_answer")
     if not isinstance(question, str) or not question.strip():
         raise ValueError("the reply has no question")
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("the reply has no expected_answer")
     return question.strip(), answer.strip()
+
+
+_VAGUE = re.compile(
+    r"\b(?:these|those)\s+(?:\w+\s+)?(?:works?|articles?|papers?|approaches|systems|methods"
+    r"|studies|frameworks|techniques|models)\b"
+    r"|\bthe\s+(?:two|three|four)\b"
+    r"|\b(?:the\s+)?(?:first|second|third)\s+(?:work|article|paper|approach|system|method"
+    r"|study|framework)\b"
+    r"|\b(?:this|the)\s+(?:article|paper|study|work)s?\b"
+    r"|\bboth\s+(?:works?|articles?|papers?|approaches|systems|methods)\b",
+    re.IGNORECASE,
+)
+MAX_REWRITES = 1  # one more attempt, told what was wrong
+
+
+def find_vague_wording(question: str) -> str | None:
+    """The first vague reference ("these works", "the two approaches"...) or None.
+
+    Such a question does not say what it is about, so no search system could find its articles.
+    """
+    match = _VAGUE.search(question)
+    return match.group(0) if match else None
+
+
+def write_question(plan: QuestionPlan, llm: LLM) -> tuple[str, str]:
+    """Ask the model, and once more if the question is vague. Raises ValueError on failure."""
+    prompt = build_prompt(plan)
+    attempt_prompt = prompt
+    vague: str | None = None
+    for _ in range(MAX_REWRITES + 1):
+        question, answer = parse_generation(llm.complete(SYSTEM_PROMPT, attempt_prompt).text)
+        vague = find_vague_wording(question)
+        if vague is None:
+            return question, answer
+        attempt_prompt = (
+            f"{prompt}\n\nYour previous question was rejected: it says {vague!r}, which does not "
+            "say what it is about. Rewrite it naming the specific systems, methods or topics."
+        )
+    raise ValueError(f"still vague after a rewrite: {vague!r}")
 
 
 def generate_candidates(
@@ -229,9 +281,7 @@ def generate_candidates(
     for plan in plans:
         label = f"{plan.type} on {', '.join(a.arxiv_id for a in plan.articles)}"
         try:
-            question, answer = parse_generation(
-                llm.complete(SYSTEM_PROMPT, build_prompt(plan)).text
-            )
+            question, answer = write_question(plan, llm)
         except ValueError as exc:
             failures.append(f"{label}: {exc}")
             log(f"failed: {label}: {exc}")
