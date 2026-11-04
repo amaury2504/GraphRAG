@@ -100,6 +100,49 @@ def test_vector_index_finds_the_nearest_chunk(store: Neo4jStore) -> None:
     assert math.isclose(records[0]["score"], 1.0, rel_tol=1e-6)
 
 
+def test_vector_search_returns_hits_with_their_article(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1), art(2)])
+    store.upsert_chunks([indexed(1, 0, "near", 7), indexed(2, 0, "far", 8)])
+    hits = [h for h in store.vector_search(unit_vector(7), 50) if h.arxiv_id.startswith("9999.")]
+    first = hits[0]
+    assert (first.arxiv_id, first.title, first.position, first.text) == (
+        "9999.00001",
+        "T1",
+        0,
+        "near",
+    )
+    assert math.isclose(first.score, 1.0, rel_tol=1e-6)
+    assert [h.score for h in hits] == sorted((h.score for h in hits), reverse=True)
+
+
+def test_keyword_search_matches_words_and_respects_k(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1), art(2)])
+    store.upsert_chunks([indexed(1, 0, "zqxwv zqxwv retrieval", 0), indexed(2, 0, "zqxwv once", 1)])
+    hits = store.keyword_search("ZQXWV", 10)
+    assert [h.arxiv_id for h in hits] == ["9999.00001", "9999.00002"]
+    assert hits[0].text == "zqxwv zqxwv retrieval"
+    assert len(store.keyword_search("zqxwv", 1)) == 1
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        'what is "zqxwv"? (AND/OR) a+b -c ~ * : \\ / [x TO y] {z} ^2 && || !',
+        "zqxwv AND NOT",
+        "zqxwv-based: retrieval?",
+    ],
+)
+def test_keyword_search_accepts_any_user_text(store: Neo4jStore, question: str) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "zqxwv retrieval", 0)])
+    assert "9999.00001" in [h.arxiv_id for h in store.keyword_search(question, 10)]
+
+
+@pytest.mark.parametrize("question", ["", "   ", "???", '"" ()'])
+def test_keyword_search_without_words_finds_nothing(store: Neo4jStore, question: str) -> None:
+    assert store.keyword_search(question, 10) == []
+
+
 def test_fulltext_index_searches_title_and_chunk(store: Neo4jStore) -> None:
     store.upsert_articles([art(1)])
     store.upsert_chunks([indexed(1, 0, "zqxwv benchmark results", 0)])

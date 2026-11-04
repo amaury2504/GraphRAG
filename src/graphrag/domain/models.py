@@ -35,6 +35,17 @@ class IndexedChunk:
 
 
 @dataclass(frozen=True, slots=True)
+class SearchHit:
+    """One chunk found by a search, with its article; `score` depends on the search used."""
+
+    arxiv_id: str
+    title: str
+    position: int
+    text: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
 class Author:
     key: str
     name: str

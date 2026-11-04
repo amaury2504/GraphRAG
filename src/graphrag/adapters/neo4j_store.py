@@ -9,6 +9,7 @@ from graphrag.domain.models import (
     GraphCounts,
     IndexedChunk,
     ReferenceRecord,
+    SearchHit,
     WorkRecord,
 )
 
@@ -93,6 +94,47 @@ SET c.arxiv_id = row.arxiv_id,
     c.embedding = row.embedding
 MERGE (c)-[:PART_OF]->(a)
 """
+
+
+VECTOR_SEARCH = """
+CALL db.index.vector.queryNodes($index, $k, $vector) YIELD node, score
+MATCH (node)-[:PART_OF]->(a:Article)
+RETURN a.arxiv_id AS arxiv_id, a.title AS title, node.position AS position,
+       node.text AS text, score
+ORDER BY score DESC
+"""
+
+KEYWORD_SEARCH = """
+CALL db.index.fulltext.queryNodes($index, $lucene) YIELD node, score
+MATCH (node)-[:PART_OF]->(a:Article)
+RETURN a.arxiv_id AS arxiv_id, a.title AS title, node.position AS position,
+       node.text AS text, score
+ORDER BY score DESC
+LIMIT $k
+"""
+
+# Characters with a meaning in Lucene query syntax; `&` and `|` cover `&&` and `||`.
+_LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
+
+
+def lucene_query(text: str) -> str:
+    """Turn user text into a Lucene query that matches its words, with no operators.
+
+    Special characters are escaped, and the text is lowercased so that AND, OR, NOT and TO
+    are plain words (the default analyzer lowercases the indexed text anyway).
+    """
+    escaped = "".join(f"\\{ch}" if ch in _LUCENE_SPECIAL else ch for ch in text.lower())
+    return " ".join(escaped.split())
+
+
+def _hit(record: Any) -> SearchHit:
+    return SearchHit(
+        arxiv_id=record["arxiv_id"],
+        title=record["title"],
+        position=record["position"],
+        text=record["text"],
+        score=float(record["score"]),
+    )
 
 
 def _article(node: Any) -> Article:
@@ -227,6 +269,19 @@ class Neo4jStore:
 
         with self._driver.session() as session:
             session.execute_write(write)  # one transaction: an article is never half indexed
+
+    def vector_search(self, vector: Sequence[float], k: int) -> list[SearchHit]:
+        with self._driver.session() as session:
+            result = session.run(VECTOR_SEARCH, index=VECTOR_INDEX, k=k, vector=list(vector))
+            return [_hit(record) for record in result]
+
+    def keyword_search(self, text: str, k: int) -> list[SearchHit]:
+        if not any(ch.isalnum() for ch in text):
+            return []  # nothing to match, and Lucene rejects an empty query
+        query = lucene_query(text)
+        with self._driver.session() as session:
+            result = session.run(KEYWORD_SEARCH, index=FULLTEXT_INDEX, lucene=query, k=k)
+            return [_hit(record) for record in result]
 
     def chunk_count(self) -> int:
         with self._driver.session() as session:
