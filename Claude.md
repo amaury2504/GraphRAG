@@ -52,6 +52,7 @@ tests/
 # démarrer les services      : cp .env.example .env && docker compose up -d --build --wait
 # lancer les tests           : uv run pytest                (unitaires, sans réseau)
 #                              uv run pytest -m integration (nécessite les services ; charger .env)
+#                              uv run pytest -m model       (vrai modèle d'embeddings, téléchargé au 1er lancement)
 # lint et types              : uv run ruff check . && uv run ruff format --check . && uv run mypy
 # ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
 #                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
