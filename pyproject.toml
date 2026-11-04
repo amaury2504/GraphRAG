@@ -8,6 +8,8 @@ dependencies = [
     "neo4j>=6.4.1",
     "psycopg[binary]>=3.3.7",
     "pydantic-settings>=2.16.2",
+    "sentence-transformers>=6.2.0",
+    "torch>=2.15.0",
     "uvicorn>=0.54.0",
 ]
 
@@ -19,14 +21,28 @@ dev = [
     "ruff>=0.17.3",
 ]
 
+# CPU-only torch on Linux (CI, Docker image); PyPI already ships CPU wheels for Windows.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers -m 'not integration'"
-markers = ["integration: needs the docker compose services (run with -m integration)"]
+addopts = "-ra --strict-markers -m 'not integration and not model'"
+markers = [
+    "integration: needs the docker compose services (run with -m integration)",
+    "model: runs the real embedding model, downloaded on first use (run with -m model)",
+]
 
 [tool.ruff]
 line-length = 100
