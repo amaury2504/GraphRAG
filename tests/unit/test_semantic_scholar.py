@@ -151,18 +151,18 @@ def test_shared_pool_429s_are_retried_patiently() -> None:
     env = Env([httpx.Response(429)] * 3 + [httpx.Response(200, json=sample_payload())])
     assert len(env.source().fetch_references(IDS)) == 2
     assert len(env.requests) == 4
-    assert env.sleeps[:3] == [10.0, 20.0, 20.0]  # capped at 20 s
+    assert env.sleeps[:3] == [10.0, 10.0, 10.0]  # flat 10 s
 
 
-def test_a_batch_gets_thirty_attempts_before_being_given_up() -> None:
-    env = Env([httpx.Response(429)] * 29 + [httpx.Response(200, json=sample_payload())])
+def test_a_batch_gets_sixty_attempts_before_being_given_up() -> None:
+    env = Env([httpx.Response(429)] * 59 + [httpx.Response(200, json=sample_payload())])
     assert len(env.source().fetch_references(IDS)) == 2
-    assert len(env.requests) == 30
+    assert len(env.requests) == 60
 
 
-def test_thirty_429s_give_up_the_batch() -> None:
-    env = Env([httpx.Response(429)] * 30)
-    with pytest.raises(RequestFailedError, match="30 attempts"):
+def test_sixty_429s_give_up_the_batch() -> None:
+    env = Env([httpx.Response(429)] * 60)
+    with pytest.raises(RequestFailedError, match="60 attempts"):
         env.source().fetch_references(IDS)
 
 

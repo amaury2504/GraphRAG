@@ -20,8 +20,8 @@ class SemanticScholarSource:
     """Reference lists from the Semantic Scholar Graph API, without an API key.
 
     The anonymous pool is shared and often answers 429, with short open windows: retries
-    are frequent (at most 20 s apart) and many (30), so a batch catches a window without
-    being given up too early (about 10 minutes of waiting in total).
+    are frequent (10 s apart) and many (60), so a batch catches a window without being
+    given up too early (about 10 minutes of waiting in total).
     """
 
     def __init__(
@@ -30,8 +30,8 @@ class SemanticScholarSource:
         *,
         min_interval: float = 1.0,
         retry_delay: float = 10.0,
-        max_delay: float = 20.0,
-        max_attempts: int = 30,
+        max_delay: float = 10.0,
+        max_attempts: int = 60,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:

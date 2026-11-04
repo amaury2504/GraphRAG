@@ -74,7 +74,7 @@ Corpus complet : `uv run python -m graphrag.cli.ingest` (fenêtre par défaut = 
 
 - **PostgreSQL natif Windows sur le port 5432** : le conteneur est exposé sur **5433** (`POSTGRES_DSN` dans `.env.example`).
 - **Docker Desktop** doit être lancé (`C:\Users\amaur\AppData\Local\Programs\DockerDesktop\Docker Desktop.exe`) ; le démon met environ une minute à démarrer.
-- **Semantic Scholar anonyme** : le pool partagé répond souvent `429`. Fenêtres ouvertes courtes : retry fréquent (10 s puis 20 s plafonné, 30 essais, environ 10 min par lot), sonde de nuit qui relance `--citations-only` au premier 200. Une clé gratuite est possible mais non nécessaire.
+- **Semantic Scholar anonyme** : le pool partagé répond souvent `429`. Fenêtres ouvertes courtes : retry fréquent (toutes les 10 s, 60 essais, environ 10 min par lot), sonde de nuit qui relance `--citations-only` au premier 200. Une clé gratuite est possible mais non nécessaire.
 - **API arXiv** : renvoie parfois une entrée d'erreur dans une réponse HTTP 200 (traitée comme erreur à réessayer). Respecter 1 requête / 3 s. `max_results=0` provoque une erreur : ne pas l'utiliser.
 - **PowerShell 5.1** : `Set-Content -Encoding utf8` ajoute un BOM qui casse `pyproject.toml` ; écrire en UTF-8 sans BOM. `Out-String` retarde l'affichage ; pour suivre un traitement long, lancer en arrière-plan sans `Out-String`.
 - **Bash (Git Bash)** : les chemins `/tmp` ne sont pas ceux de Python Windows ; utiliser le dossier scratchpad. Les gros blocs de heredoc se sont mal comportés une fois : préférer l'outil d'écriture de fichiers.
