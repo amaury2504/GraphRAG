@@ -8,7 +8,7 @@
 | --- | --- |
 | 1. Socle (structure, Docker Compose, CI) | **Terminée**, CI verte |
 | 2. Ingestion (arXiv, auteurs, citations → Neo4j) | **Terminée**, corpus complet ingéré le 2026-11-04. |
-| 3. RAG de base | **Commencée** : découpage des résumés et port `Embedder` faits. En attente : choix du modèle d'embeddings et du LLM. |
+| 3. RAG de base | **En cours** : découpage, embeddings bge-small, nœuds `Chunk` + index vectoriel et texte intégral faits, corpus indexé (3 879 morceaux). Reste : recherche hybride (RRF), réponse Mistral, `/ask`. |
 
 État de la base locale (2026-11-04) : 2 827 articles, 10 383 auteurs, 11 203 `AUTHORED_BY`, 924 `CITES` (539 articles citent, 526 sont cités). Semantic Scholar : 2 324 articles trouvés, 3 inconnus, 93 sans référence arXiv.
 
