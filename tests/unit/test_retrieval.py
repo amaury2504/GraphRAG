@@ -4,9 +4,12 @@ import pytest
 
 from graphrag.domain.models import SearchHit
 from graphrag.pipeline.retrieval import (
+    CANDIDATES,
     HybridRetriever,
+    KeywordRetriever,
     VectorRetriever,
     best_chunk_per_article,
+    fetch_depth,
     rrf_fuse,
 )
 
@@ -115,7 +118,7 @@ def test_retrievers_fetch_at_least_k_candidates_and_cut_to_k() -> None:
     many = [hit(f"P{i}") for i in range(30)]
     search = FakeSearch(many, many)
     assert len(VectorRetriever(search, FakeEmbedder(), candidates=5).retrieve("q", 25)) == 25
-    assert search.calls[-1][2] == 25
+    assert search.calls[-1][2] == 50  # 2 chunks per article at most: 25 articles need 50 chunks
     assert len(HybridRetriever(search, FakeEmbedder(), candidates=20).retrieve("q", 3)) == 3
     assert [c[2] for c in search.calls[-2:]] == [20, 20]
 
@@ -134,3 +137,26 @@ def test_hybrid_uses_its_rrf_constant() -> None:
     search = FakeSearch([hit("A")], [])
     (a,) = HybridRetriever(search, FakeEmbedder(), rrf_k=0).retrieve("q", 1)
     assert a.score == pytest.approx(1.0)
+
+
+def test_fetch_depth_covers_two_chunks_per_article_and_the_candidate_floor() -> None:
+    assert fetch_depth(5) == CANDIDATES == 50
+    assert fetch_depth(25) == 50
+    assert fetch_depth(30) == 60
+    assert fetch_depth(3, candidates=10) == 10
+    assert fetch_depth(7, candidates=10) == 14
+
+
+def test_every_retriever_fetches_two_chunks_per_requested_article() -> None:
+    search = FakeSearch([hit("A")], [hit("A")])
+    VectorRetriever(search, FakeEmbedder()).retrieve("q", 40)
+    HybridRetriever(search, FakeEmbedder()).retrieve("q", 40)
+    KeywordRetriever(search).retrieve("q", 40)
+    assert [c[2] for c in search.calls] == [80, 80, 80, 80]
+
+
+def test_keyword_retriever_uses_only_the_keyword_search_and_dedupes() -> None:
+    search = FakeSearch([hit("X")], [hit("A", 0, 0.9), hit("A", 1, 0.8), hit("B", 0, 0.7)])
+    result = KeywordRetriever(search).retrieve("graph RAG?", k=5)
+    assert search.calls == [("keyword", "graph RAG?", 50)]
+    assert [(h.arxiv_id, h.score) for h in result] == [("A", 0.9), ("B", 0.7)]

@@ -25,7 +25,13 @@ from graphrag.pipeline.evaluation import (
     paired_differences,
     summarize_results,
 )
-from graphrag.pipeline.retrieval import CANDIDATES, RRF_K, HybridRetriever, VectorRetriever
+from graphrag.pipeline.retrieval import (
+    CANDIDATES,
+    RRF_K,
+    HybridRetriever,
+    KeywordRetriever,
+    VectorRetriever,
+)
 from graphrag.ports.retrieval import Retriever
 from graphrag.settings import Settings
 
@@ -165,6 +171,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--questions", type=Path, default=DEFAULT_PATH)
     parser.add_argument("--ks", type=int, nargs="+", default=list(DEFAULT_KS))
     parser.add_argument("--include-unvalidated", action="store_true")
+    parser.add_argument(
+        "--with-keyword",
+        action="store_true",
+        help="also evaluate keyword-only search (diagnostic: what each half brings to the fusion)",
+    )
     parser.add_argument("--output-dir", type=Path, default=RESULTS_DIR)
     return parser.parse_args(argv)
 
@@ -184,6 +195,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "vector": VectorRetriever(store, embedder),
             "hybrid": HybridRetriever(store, embedder),
         }
+        if args.with_keyword:  # diagnostic only: appended last, so the baseline stays "vector"
+            retrievers["keyword"] = KeywordRetriever(store)
         ks = sorted(set(args.ks))
         results = evaluate_retrieval(questions, retrievers, ks)
     print(render(questions, results, ks, include_unvalidated=args.include_unvalidated))

@@ -11,7 +11,13 @@ from graphrag.ports.embedding import Embedder
 from graphrag.ports.retrieval import ChunkSearch
 
 RRF_K = 60  # constant of the original RRF paper: dampens the gap between the top ranks
-CANDIDATES = 20  # chunks fetched from each search before fusion
+CANDIDATES = 50  # chunks fetched from each search before fusion (at least)
+CHUNKS_PER_ARTICLE = 2  # an article has at most this many chunks
+
+
+def fetch_depth(k: int, candidates: int = CANDIDATES) -> int:
+    """Chunks to fetch for k articles: even if every article filled all its chunks, k remain."""
+    return max(candidates, CHUNKS_PER_ARTICLE * k)
 
 
 def best_chunk_per_article(hits: Sequence[SearchHit]) -> list[SearchHit]:
@@ -55,7 +61,19 @@ class VectorRetriever:
 
     def retrieve(self, question: str, k: int) -> list[SearchHit]:
         vector = self._embedder.embed_query(question)
-        hits = self._search.vector_search(vector, max(k, self._candidates))
+        hits = self._search.vector_search(vector, fetch_depth(k, self._candidates))
+        return best_chunk_per_article(hits)[:k]
+
+
+class KeywordRetriever:
+    """Search by keywords only: a diagnostic, to see what each half brings to the fusion."""
+
+    def __init__(self, search: ChunkSearch, *, candidates: int = CANDIDATES) -> None:
+        self._search = search
+        self._candidates = candidates
+
+    def retrieve(self, question: str, k: int) -> list[SearchHit]:
+        hits = self._search.keyword_search(question, fetch_depth(k, self._candidates))
         return best_chunk_per_article(hits)[:k]
 
 
@@ -76,7 +94,7 @@ class HybridRetriever:
         self._rrf_k = rrf_k
 
     def retrieve(self, question: str, k: int) -> list[SearchHit]:
-        n = max(k, self._candidates)
+        n = fetch_depth(k, self._candidates)
         by_meaning = self._search.vector_search(self._embedder.embed_query(question), n)
         by_keywords = self._search.keyword_search(question, n)
         return rrf_fuse([by_meaning, by_keywords], self._rrf_k)[:k]
