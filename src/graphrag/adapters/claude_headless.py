@@ -11,9 +11,11 @@ it (https://code.claude.com/docs/en/legal-and-compliance.md). Serve other users 
 """
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -24,12 +26,16 @@ from graphrag.domain.models import Completion, Usage
 # Short instruction on the command line; the sources and the question travel on stdin.
 INSTRUCTION = "Follow the system prompt to answer the message given on standard input."
 
-# (command, stdin text, timeout seconds, working directory) -> (exit code, stdout, stderr)
-Runner = Callable[[list[str], str, float, str], tuple[int, str, str]]
+# (command, stdin text, timeout seconds, working directory, environment)
+#   -> (exit code, stdout, stderr)
+Runner = Callable[[list[str], str, float, str, dict[str, str]], tuple[int, str, str]]
+
+CREDENTIALS = Path(".claude") / ".credentials.json"
+_credentials_lock = threading.Lock()
 
 
 def run_subprocess(
-    command: list[str], stdin: str, timeout: float, cwd: str
+    command: list[str], stdin: str, timeout: float, cwd: str, env: dict[str, str]
 ) -> tuple[int, str, str]:
     try:
         done = subprocess.run(
@@ -40,6 +46,7 @@ def run_subprocess(
             encoding="utf-8",
             timeout=timeout,
             cwd=cwd,
+            env=env,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -55,6 +62,7 @@ class ClaudeHeadlessLLM:
         executable: str | None = None,
         timeout: float = 120.0,
         runner: Runner = run_subprocess,
+        home: Path | None = None,
     ) -> None:
         found = executable or shutil.which("claude")
         if found is None:
@@ -63,6 +71,7 @@ class ClaudeHeadlessLLM:
         self._model = model
         self._timeout = timeout
         self._runner = runner
+        self._home = home or Path.home()
 
     def command(self, system_file: str) -> list[str]:
         command = [
@@ -87,17 +96,41 @@ class ClaudeHeadlessLLM:
         return command
 
     def complete(self, system: str, user: str) -> Completion:
-        # An empty working directory: no project hooks, no .mcp.json, no CLAUDE.md to pick up.
+        # An empty working directory and an empty home: no project hooks, no CLAUDE.md, no
+        # personal settings, hooks or skills. Without that, they leak into the answers (a
+        # personal "reply in French" made English questions get French answers).
         with tempfile.TemporaryDirectory(prefix="graphrag-claude-") as cwd:
+            home = Path(cwd) / "home"
+            home.mkdir()
             system_file = Path(cwd) / "system.txt"
             system_file.write_text(system, encoding="utf-8")
-            command = self.command(str(system_file))
-            code, stdout, stderr = self._runner(command, user, self._timeout, cwd)
+            env = {k: v for k, v in os.environ.items() if k not in ("HOMEDRIVE", "HOMEPATH")}
+            env["USERPROFILE"] = env["HOME"] = str(home)
+            self._copy_credentials_in(home)
+            try:
+                command = self.command(str(system_file))
+                code, stdout, stderr = self._runner(command, user, self._timeout, cwd, env)
+            finally:
+                self._copy_credentials_back(home)
         if code != 0 and not stdout.strip():
             # Keep only the first line of stderr, cut short: never echo a prompt.
             first = (stderr.strip().splitlines() or ["no message"])[0][:200]
             raise RequestFailedError(f"claude exited with code {code}: {first}")
         return parse_result(stdout)
+
+    def _copy_credentials_in(self, home: Path) -> None:
+        """Only the login travels into the empty home (none with an ANTHROPIC_API_KEY)."""
+        source = self._home / CREDENTIALS
+        if source.is_file():
+            (home / CREDENTIALS).parent.mkdir(parents=True)
+            shutil.copy2(source, home / CREDENTIALS)
+
+    def _copy_credentials_back(self, home: Path) -> None:
+        """If claude renewed the login in the copy, keep the renewal: the old one may be void."""
+        copy, original = home / CREDENTIALS, self._home / CREDENTIALS
+        with _credentials_lock:
+            if copy.is_file() and original.is_file() and copy.read_bytes() != original.read_bytes():
+                shutil.copy2(copy, original)
 
 
 def parse_result(stdout: str) -> Completion:
