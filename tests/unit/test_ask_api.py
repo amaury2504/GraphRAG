@@ -146,7 +146,7 @@ def test_lazy_answerer_retries_after_a_failed_build() -> None:
             raise NotConfiguredError("no key yet")
         return QuestionAnswerer({}, FakeLLM())
 
-    lazy = LazyAnswerer(build)
+    lazy = LazyAnswerer(build, failure_ttl=0.0)
     with pytest.raises(NotConfiguredError):
         lazy()
     lazy()
@@ -180,3 +180,34 @@ def test_preload_builds_the_answerer_in_the_background_and_swallows_failures() -
 
     preload(build)
     assert built.wait(5)
+
+
+def test_a_database_failure_is_a_503_not_a_crash() -> None:
+    from neo4j.exceptions import ServiceUnavailable
+
+    class Broken:
+        def retrieve(self, question: str, k: int) -> list[SearchHit]:
+            raise ServiceUnavailable("neo4j://secret-host is down")
+
+    response = client(retriever=Broken()).post("/ask", json={"question": "What works?"})  # type: ignore[arg-type]
+    assert response.status_code == 503
+    assert "secret-host" not in response.text
+
+
+def test_lazy_answerer_remembers_a_configuration_failure_for_a_while() -> None:
+    now = [0.0]
+    builds = []
+
+    def build() -> QuestionAnswerer:
+        builds.append(1)
+        raise NotConfiguredError("index built with another model")
+
+    lazy = LazyAnswerer(build, failure_ttl=30.0, clock=lambda: now[0])
+    for _ in range(3):
+        with pytest.raises(NotConfiguredError, match="another model"):
+            lazy()
+    assert len(builds) == 1  # no model reload per request
+    now[0] = 31.0
+    with pytest.raises(NotConfiguredError):
+        lazy()
+    assert len(builds) == 2  # retried once the delay has passed

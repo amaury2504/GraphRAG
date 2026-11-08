@@ -1,8 +1,10 @@
 import logging
 import threading
+import time
 from collections.abc import Callable, Sequence
 from typing import Annotated, Literal
 
+import neo4j.exceptions
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel, Field, StringConstraints
 
@@ -137,23 +139,50 @@ def create_app(
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY, "the language model is unavailable"
             ) from None
+        except neo4j.exceptions.Neo4jError, neo4j.exceptions.DriverError:
+            logger.exception("the database call failed")
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "the database is unavailable"
+            ) from None
         return AskResponse.of(answer, request.configuration)
 
     return app
 
 
 class LazyAnswerer:
-    """Builds the answerer on the first /ask, so /health and startup stay fast."""
+    """Builds the answerer on the first /ask, so /health and startup stay fast.
 
-    def __init__(self, build: Callable[[], QuestionAnswerer]) -> None:
+    A configuration problem (no key, index built with another model) is remembered for
+    `failure_ttl` seconds: without that, every request would load the embedding model again
+    just to fail the same way.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[], QuestionAnswerer],
+        *,
+        failure_ttl: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._build = build
+        self._failure_ttl = failure_ttl
+        self._clock = clock
         self._lock = threading.Lock()
         self._value: QuestionAnswerer | None = None
+        self._failure: tuple[float, str] | None = None
 
     def __call__(self) -> QuestionAnswerer:
         with self._lock:
-            if self._value is None:
+            if self._value is not None:
+                return self._value
+            if self._failure is not None and self._clock() - self._failure[0] < self._failure_ttl:
+                raise NotConfiguredError(self._failure[1])
+            try:
                 self._value = self._build()
+            except NotConfiguredError as exc:
+                self._failure = (self._clock(), str(exc))
+                raise
+            self._failure = None
             return self._value
 
 
