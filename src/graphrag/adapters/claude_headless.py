@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from graphrag.adapters.http import RequestFailedError
@@ -63,15 +64,18 @@ class ClaudeHeadlessLLM:
         self._timeout = timeout
         self._runner = runner
 
-    def command(self, system: str) -> list[str]:
+    def command(self, system_file: str) -> list[str]:
         command = [
             self._executable,
             "-p",
             INSTRUCTION,
             "--output-format",
             "json",
-            "--system-prompt",
-            system,  # replaces Claude Code's own prompt: no agent behaviour
+            # Replaces Claude Code's own prompt: no agent behaviour. A file, not an argument:
+            # on Windows `claude` is a .CMD script and a line break in an argument cuts the
+            # command there, silently dropping the flags after it (tools stayed enabled).
+            "--system-prompt-file",
+            system_file,
             "--tools",
             "",  # no file, shell or web access
             "--max-turns",
@@ -85,7 +89,10 @@ class ClaudeHeadlessLLM:
     def complete(self, system: str, user: str) -> Completion:
         # An empty working directory: no project hooks, no .mcp.json, no CLAUDE.md to pick up.
         with tempfile.TemporaryDirectory(prefix="graphrag-claude-") as cwd:
-            code, stdout, stderr = self._runner(self.command(system), user, self._timeout, cwd)
+            system_file = Path(cwd) / "system.txt"
+            system_file.write_text(system, encoding="utf-8")
+            command = self.command(str(system_file))
+            code, stdout, stderr = self._runner(command, user, self._timeout, cwd)
         if code != 0 and not stdout.strip():
             # Keep only the first line of stderr, cut short: never echo a prompt.
             first = (stderr.strip().splitlines() or ["no message"])[0][:200]

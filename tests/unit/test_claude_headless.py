@@ -26,11 +26,15 @@ class Recorder:
     def __init__(self, reply: tuple[int, str, str]) -> None:
         self.reply = reply
         self.calls: list[tuple[list[str], str, float, str]] = []
+        self.system_files: list[str] = []
 
     def __call__(
         self, command: list[str], stdin: str, timeout: float, cwd: str
     ) -> tuple[int, str, str]:
         self.calls.append((command, stdin, timeout, cwd))
+        # the file only exists during the call
+        with open(command[command.index("--system-prompt-file") + 1], encoding="utf-8") as f:
+            self.system_files.append(f.read())
         return self.reply
 
 
@@ -40,11 +44,12 @@ def llm(runner: Recorder, model: str | None = None) -> ClaudeHeadlessLLM:
 
 def test_runs_without_tools_with_own_system_prompt_and_content_on_stdin() -> None:
     runner = Recorder((0, OK, ""))
-    completion = llm(runner, model="sonnet").complete("SYSTEM", "SOURCES + QUESTION")
+    completion = llm(runner, model="sonnet").complete("SYSTEM\nline two", "SOURCES + QUESTION")
     command, stdin, _, cwd = runner.calls[0]
     assert stdin == "SOURCES + QUESTION"
     assert "SOURCES + QUESTION" not in command  # never on the command line
-    assert command[command.index("--system-prompt") + 1] == "SYSTEM"
+    assert runner.system_files == ["SYSTEM\nline two"]  # multi-line text travels in a file
+    assert not any("\n" in part for part in command)  # a line break would cut a .CMD command
     assert command[command.index("--tools") + 1] == ""
     assert command[command.index("--max-turns") + 1] == "1"
     assert "--no-session-persistence" in command
