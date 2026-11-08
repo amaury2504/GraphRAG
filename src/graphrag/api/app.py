@@ -13,6 +13,7 @@ from graphrag.adapters.http import RequestFailedError
 from graphrag.domain.models import Answer, SearchHit, Timings
 from graphrag.pipeline.answer import DEFAULT_K, QuestionAnswerer
 from graphrag.ports.health import HealthProbe
+from graphrag.ports.llm import LLM
 from graphrag.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -188,7 +189,7 @@ class LazyAnswerer:
 
 def build_answerer(settings: Settings) -> QuestionAnswerer:
     key = settings.mistral_api_key.get_secret_value() if settings.mistral_api_key else ""
-    if not key:
+    if settings.llm_provider == "mistral" and not key:
         raise NotConfiguredError("MISTRAL_API_KEY is not set")
     # Imported here: they pull in torch, which /health does not need.
     from graphrag.adapters.mistral import MistralLLM, mistral_client
@@ -206,10 +207,18 @@ def build_answerer(settings: Settings) -> QuestionAnswerer:
     except ValueError as exc:
         store.close()
         raise NotConfiguredError(str(exc)) from exc
-    llm = MeteredLLM(
-        MistralLLM(mistral_client(key), model=settings.mistral_model),
-        UsageMeter(settings.token_alert),
-    )
+    inner: LLM
+    if settings.llm_provider == "claude":
+        from graphrag.adapters.claude_headless import ClaudeHeadlessLLM
+
+        try:
+            inner = ClaudeHeadlessLLM(model=settings.claude_model)
+        except RequestFailedError as exc:
+            store.close()
+            raise NotConfiguredError(str(exc)) from exc
+    else:
+        inner = MistralLLM(mistral_client(key), model=settings.mistral_model)
+    llm = MeteredLLM(inner, UsageMeter(settings.token_alert))
     return QuestionAnswerer(
         {"vector": VectorRetriever(store, embedder), "hybrid": HybridRetriever(store, embedder)},
         llm,
