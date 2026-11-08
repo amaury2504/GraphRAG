@@ -2,7 +2,7 @@
 
 Application qui répond à des questions sur des articles arXiv d'IA et de RAG, avec citations
 (recherche hybride, élargissement par le graphe, réponse). Projet d'apprentissage, V1 en cours.
-Règles du projet : `Claude.md`. Spécification : `Spec.md`.
+Règles du projet : `CLAUDE.md`. Spécification : `SPEC.md`.
 
 ## Démarrage
 

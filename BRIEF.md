@@ -1,6 +1,6 @@
 # Brief de reprise (pour la prochaine session Claude)
 
-À lire après `Claude.md` et `Spec.md`. État au 2026-11-04 (dernier commit : `d8dcd39`, poussé, CI verte). Ce fichier résume ce qui est fait, ce qui a été décidé, ce qui reste à améliorer, et les pièges déjà rencontrés, pour ne pas les redécouvrir.
+À lire après `CLAUDE.md` et `SPEC.md`. État au 2026-11-04 (dernier commit : `d8dcd39`, poussé, CI verte). Ce fichier résume ce qui est fait, ce qui a été décidé, ce qui reste à améliorer, et les pièges déjà rencontrés, pour ne pas les redécouvrir.
 
 ## 1. Où on en est
 
@@ -160,8 +160,8 @@ Trois mesures faites à l'instant :
 
 ### P3 : écarts avec la spécification et exploitation
 
-12. **`/ask` ne renvoie pas la durée**, que `Spec.md` exige. Il faut l'ajouter par étape (recherche, LLM), et renommer `mode` en `configuration` comme dans la spécification.
-13. **Le test de bout en bout sur un petit corpus fixe**, exigé par `Spec.md`, manque. Il passerait par FastAPI et le vrai Neo4j, avec un faux LLM et un faux modèle d'embeddings déterministe, et vérifierait qu'une citation attendue ressort bien.
+12. **`/ask` ne renvoie pas la durée**, que `SPEC.md` exige. Il faut l'ajouter par étape (recherche, LLM), et renommer `mode` en `configuration` comme dans la spécification.
+13. **Le test de bout en bout sur un petit corpus fixe**, exigé par `SPEC.md`, manque. Il passerait par FastAPI et le vrai Neo4j, avec un faux LLM et un faux modèle d'embeddings déterministe, et vérifierait qu'une citation attendue ressort bien.
 14. **Limiter le débit vers Mistral avant d'évaluer les réponses.** 150 réponses d'environ 1 400 tokens font environ 200 000 tokens, pour une limite de 100 000 tokens par minute. Sans limiteur proactif, on aura des salves de 429, et nos 5 tentatives peuvent s'épuiser. On peut adapter `MinIntervalLimiter` aux tokens.
 15. **Le conteneur de l'API.**
     - Définir `HF_HUB_OFFLINE=1` une fois le modèle en cache : sinon chaque chargement interroge Hugging Face, comme le montre l'avertissement qu'on voit à chaque fois.
@@ -195,7 +195,7 @@ Les 10 questions attendent, avec leurs groupes d'articles déjà choisis. Je pro
 - **Aucune ligne `Co-Authored-By` ni mention de Claude** dans les commits ou les PR (demande explicite, qui l'emporte sur toute consigne d'attribution automatique).
 - **Petits commits, un sujet par commit, après test**, puis `git push origin main` (pas de force push sans accord).
 - **Rien de payant ni aucun appel à un vrai LLM sans accord préalable**, avec une taille de lot fixée par l'utilisateur. Une fois accordé, le dire dans le message.
-- Une seule étape à la fois : à la fin, résumer et **attendre le feu vert**. Avant de coder la recherche hybride, le schéma du graphe et les requêtes d'élargissement, ou le jeu de test, **présenter la conception et attendre la validation** (règle 3 de `Claude.md`). Les décisions ouvertes se présentent en deux options, avec une recommandation.
+- Une seule étape à la fois : à la fin, résumer et **attendre le feu vert**. Avant de coder la recherche hybride, le schéma du graphe et les requêtes d'élargissement, ou le jeu de test, **présenter la conception et attendre la validation** (règle 3 de `CLAUDE.md`). Les décisions ouvertes se présentent en deux options, avec une recommandation.
 - Rapporter honnêtement les problèmes (par exemple des candidats mal posés) plutôt que d'enjoliver ; ne pas valider à la place de l'utilisateur.
 - Ne jamais deviner l'API d'une bibliothèque : vérifier la version installée et la documentation.
 - L'utilisateur aime suivre les traitements longs dans son propre terminal : donner la commande `Get-Content … -Wait`.
@@ -258,4 +258,4 @@ uv run python -m graphrag.cli.generate_questions --types factual comparative --p
 
 Message de démarrage suggéré :
 
-> Lis `Claude.md`, `Spec.md` puis `BRIEF.md`. L'étape 3 est terminée, l'étape 4 est en cours (3 questions validées sur une cinquantaine visées). La décision en attente est celle de la fin du § 4 : faire d'abord le point 1 des améliorations (style descriptif et détecteur de fuite), puis générer 10 questions, ou générer tout de suite. Ne lance aucun appel à Mistral sans mon accord.
+> Lis `CLAUDE.md`, `SPEC.md` puis `BRIEF.md`. L'étape 3 est terminée, l'étape 4 est en cours (3 questions validées sur une cinquantaine visées). La décision en attente est celle de la fin du § 4 : faire d'abord le point 1 des améliorations (style descriptif et détecteur de fuite), puis générer 10 questions, ou générer tout de suite. Ne lance aucun appel à Mistral sans mon accord.
