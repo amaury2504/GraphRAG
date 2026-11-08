@@ -85,3 +85,34 @@ def test_an_empty_window_never_blocks_even_an_oversized_first_call() -> None:
 def test_the_quota_must_be_positive() -> None:
     with pytest.raises(ValueError, match="positive"):
         TokenRateLimiter(0)
+
+
+def test_concurrent_threads_never_exceed_the_quota() -> None:
+    import threading
+
+    clock = Clock()
+    guard = threading.Lock()
+
+    def sleep(seconds: float) -> None:
+        with guard:
+            clock.sleep(seconds)
+
+    lim = TokenRateLimiter(100, clock=clock, sleep=sleep)
+    reservations: list[list[float]] = []
+
+    def work() -> None:
+        for _ in range(5):
+            reservation = lim.acquire(40)
+            with guard:
+                reservations.append(reservation)
+
+    threads = [threading.Thread(target=work) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(reservations) == 30
+    for r in reservations:
+        in_window = sum(o[1] for o in reservations if r[0] - 60.0 < o[0] <= r[0])
+        assert in_window <= 100

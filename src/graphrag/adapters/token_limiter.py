@@ -1,5 +1,6 @@
 """Keep token consumption under a per-minute quota, waiting instead of provoking 429 errors."""
 
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -27,6 +28,7 @@ class TokenRateLimiter:
         self._clock = clock
         self._sleep = sleep
         self._entries: deque[list[float]] = deque()  # [time, tokens], oldest first
+        self._lock = threading.Lock()  # the API serves /ask from several threads
 
     def _used(self) -> float:
         return sum(tokens for _, tokens in self._entries)
@@ -43,13 +45,14 @@ class TokenRateLimiter:
         refusing it would block it forever.
         """
         while True:
-            self._forget_expired()
-            if not self._entries or self._used() + estimate <= self._limit:
-                break
-            self._sleep(max(self._entries[0][0] + self._window - self._clock(), 0.0))
-        reservation = [self._clock(), float(estimate)]
-        self._entries.append(reservation)
-        return reservation
+            with self._lock:
+                self._forget_expired()
+                if not self._entries or self._used() + estimate <= self._limit:
+                    reservation = [self._clock(), float(estimate)]
+                    self._entries.append(reservation)
+                    return reservation
+                wait = max(self._entries[0][0] + self._window - self._clock(), 0.0)
+            self._sleep(wait)  # outside the lock: other threads can still settle or reserve
 
     @staticmethod
     def settle(reservation: list[float], actual: int) -> None:
