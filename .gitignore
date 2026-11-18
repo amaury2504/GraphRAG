@@ -14,3 +14,7 @@ exports/
 
 # Evaluation reports are regenerated; commit one on purpose if it is a deliverable
 eval/results/
+
+# Rapports des gates (scripts/gates.py)
+reports/
+mutants/
