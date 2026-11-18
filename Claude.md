@@ -42,6 +42,8 @@ tests/
 - Tests unitaires et d'intégration sans réseau et sans vrai LLM : utiliser un faux LLM et une base de test.
 - Les tests d'évaluation (jeu de test d'une cinquantaine de questions) appellent de vrais modèles : ils se lancent à la demande, jamais automatiquement.
 - Versions des dépendances et des images Docker figées.
+- **Gates** : `uv run python scripts/gates.py --skip mutation --skip gitleaks` (lint, format, types, tests avec couverture, anti-contournement). C'est la commande de la CI ; elle doit être verte avant un commit. Seuil de couverture : `fail_under` dans `pyproject.toml` (85 %, mesuré à 88 %), à relever par paliers, jamais à baisser. Pas de `typing.cast` ni de contournement du typage (la gate anti-contournement le refuse).
+- **PR** : une PR qui ne touche que la doc ou la roadmap se merge sans attendre la CI ; une PR contenant du code attend une CI verte (jobs `quality` et `integration`).
 
 ## Commandes
 
@@ -54,6 +56,7 @@ tests/
 #                              uv run pytest -m integration (nécessite les services ; charger .env)
 #                              uv run pytest -m model       (vrai modèle d'embeddings, téléchargé au 1er lancement)
 # lint et types              : uv run ruff check . && uv run ruff format --check . && uv run mypy
+# gates (comme la CI)        : uv run python scripts/gates.py --skip mutation --skip gitleaks
 # ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
 #                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
 # indexation (morceaux)      : uv run python -m graphrag.cli.index [--limit N] [--batch-size N]
