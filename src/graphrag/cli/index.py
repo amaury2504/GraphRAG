@@ -1,7 +1,8 @@
 """Cut abstracts into chunks, embed them and store them in Neo4j with their indexes.
 
-Only articles without chunks are processed, so a rerun resumes where the last one stopped
-and picks up newly ingested articles.
+Only articles whose hash (title, abstract, chunker version) differs from the one they were
+indexed from are processed: a rerun resumes where the last one stopped, picks up new and
+modified articles, and leaves the others untouched.
 """
 
 import argparse
@@ -13,7 +14,8 @@ from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.sentence_transformer import default_index_info, load_default_embedder
 from graphrag.cli.ingest import log_line
 from graphrag.domain.chunking import chunk_abstract, search_text
-from graphrag.domain.models import Article, IndexedChunk, IndexInfo
+from graphrag.domain.hashing import article_hash
+from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
 from graphrag.ports.embedding import Embedder
 from graphrag.ports.indexing import ChunkStore
 from graphrag.settings import Settings
@@ -26,6 +28,7 @@ class IndexReport:
     articles: int
     chunks: int
     total_chunks: int
+    removed: int = 0  # orphan chunks deleted from re-indexed articles
 
 
 def index_articles(articles: Sequence[Article], embedder: Embedder) -> list[IndexedChunk]:
@@ -51,16 +54,27 @@ def run_indexing(
     store.ensure_chunk_schema(embedder.dimensions)
     if info is not None:
         store.ensure_index_info(info)
-    todo = store.articles_without_chunks(limit)
+    todo = stale_articles(store.articles_with_index_state(), limit)
     log(f"chunks: {len(todo)} articles to index")
     written = 0
+    removed = 0
     for start in range(0, len(todo), batch_size):
         batch = todo[start : start + batch_size]
         indexed = index_articles(batch, embedder)
-        store.upsert_chunks(indexed)  # all chunks of these articles, in one transaction
+        # New chunks, orphans and hash of these articles all land in one transaction.
+        removed += store.upsert_chunks(indexed, {a.arxiv_id: article_hash(a) for a in batch})
         written += len(indexed)
-        log(f"chunks: {start + len(batch)}/{len(todo)} articles indexed, {written} chunks")
-    return IndexReport(articles=len(todo), chunks=written, total_chunks=store.chunk_count())
+        progress = f"chunks: {start + len(batch)}/{len(todo)} articles indexed, {written} chunks"
+        log(f"{progress}, {removed} removed" if removed else progress)
+    return IndexReport(
+        articles=len(todo), chunks=written, total_chunks=store.chunk_count(), removed=removed
+    )
+
+
+def stale_articles(states: Sequence[ArticleIndexState], limit: int | None = None) -> list[Article]:
+    """Articles whose current hash differs from the one they were indexed from (or none)."""
+    stale = [s.article for s in states if s.indexed_hash != article_hash(s.article)]
+    return stale if limit is None else stale[:limit]
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:

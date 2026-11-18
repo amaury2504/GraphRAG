@@ -15,7 +15,13 @@ from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.openalex import BATCH_SIZE, OpenAlexSource
 from graphrag.adapters.semantic_scholar import BATCH_SIZE as SEMANTIC_SCHOLAR_BATCH
 from graphrag.adapters.semantic_scholar import SemanticScholarSource
-from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
+from graphrag.domain.models import (
+    Article,
+    ArticleChanges,
+    GraphCounts,
+    ReferenceRecord,
+    WorkRecord,
+)
 from graphrag.ports.ingestion import (
     AuthorSource,
     CitationLedger,
@@ -37,6 +43,9 @@ def log_line(message: str) -> None:
 @dataclass(frozen=True, slots=True)
 class IngestionReport:
     articles_fetched: int
+    articles_new: int  # not stored yet
+    articles_modified: int  # stored, but title or abstract (hash) differs: rerun cli.index
+    articles_unchanged: int
     authors_found: int
     authors_missing: int
     references_found: int
@@ -70,6 +79,7 @@ def run_ingestion(
 
     # Phase 1: articles. Written page by page, so an interruption loses at most one page.
     fetched = 0
+    changes = ArticleChanges()
     stream = papers.iter_papers(start, end)
     if limit is not None:
         stream = islice(stream, limit)
@@ -78,12 +88,12 @@ def run_ingestion(
         batch.append(article)
         fetched += 1
         if len(batch) == ARTICLE_BATCH:
-            store.upsert_articles(batch)
+            changes += store.upsert_articles(batch)
             batch = []
             log(f"articles: {fetched} fetched")
     if batch:
-        store.upsert_articles(batch)
-    log(f"articles: {fetched} fetched (done)")
+        changes += store.upsert_articles(batch)
+    log(f"articles: {fetched} fetched (done), {changes.new} new, {changes.modified} modified")
 
     # Phase 2: authors and citations for the whole stored corpus, so reruns stay consistent.
     ids = store.article_ids()
@@ -98,6 +108,9 @@ def run_ingestion(
 
     return IngestionReport(
         articles_fetched=fetched,
+        articles_new=changes.new,
+        articles_modified=changes.modified,
+        articles_unchanged=changes.unchanged,
         authors_found=len(works),
         authors_missing=len(ids) - len(works),
         references_found=cites.found,

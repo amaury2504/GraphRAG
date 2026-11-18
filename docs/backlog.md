@@ -6,7 +6,6 @@
 
 | Tâche | Contenu | Dépend de | État |
 | --- | --- | --- | --- |
-| T1 | Ré-ingestion incrémentale : identifiants de chunk déterministes (document + position), content hash (texte + version du chunker + modèle d'embedding), ajout/modification/suppression des seuls chunks changés, idempotence et reprise sur événement rejoué | | libre |
 | T2 | Versioning atomique : chunks immuables partagés entre versions, manifeste par version, pointeur « version courante » basculé en une opération, rollback | T1 | libre |
 | T3 | Cohérence en lecture : statuts de version (`pending`, `indexed`, `active`), la version n'est lisible qu'une fois vecteurs et texte intégral indexés | T2 | libre |
 | T4 | Garbage collection (mark and sweep) des chunks non référencés par une version conservée, durée de rétention, compactage ou reconstruction de l'index vectoriel | T2 | libre |
@@ -18,3 +17,4 @@
 
 | Tâche | Ce qui a été livré |
 | --- | --- |
+| T1 | Ré-ingestion incrémentale : hash d'article (titre + résumé + `CHUNKER_VERSION`), l'ingestion réécrit seulement les articles nouveaux ou modifiés et les compte, l'indexation ré-indexe les articles dont le hash diffère (chunks, orphelins supprimés et `indexed_hash` dans une transaction), rejeu idempotent, reprise après interruption. Identifiants de chunk inchangés (`arxiv_id#position`). Le modèle d'embedding n'est pas dans le hash (T5). |

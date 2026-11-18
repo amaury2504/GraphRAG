@@ -13,7 +13,15 @@ import pytest
 
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.cli.ingest import run_ingestion
-from graphrag.domain.models import Article, Author, GraphCounts, ReferenceRecord, WorkRecord
+from graphrag.domain.hashing import article_hash
+from graphrag.domain.models import (
+    Article,
+    ArticleChanges,
+    Author,
+    GraphCounts,
+    ReferenceRecord,
+    WorkRecord,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -100,16 +108,82 @@ def test_all_articles_returns_complete_articles_in_id_order(store: Neo4jStore) -
     assert ours == [art(1), art(2)]
 
 
-def test_existing_article_is_not_reinserted_or_modified(store: Neo4jStore) -> None:
+def _stored(query: str, **params: str) -> list[neo4j.Record]:
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        records, _, _ = driver.execute_query(query, parameters_=dict(params))
+    return list(records)
+
+
+def test_new_articles_are_counted_and_get_a_content_hash(store: Neo4jStore) -> None:
+    assert store.upsert_articles([art(1), art(2)]) == ArticleChanges(new=2)
+    records = _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) RETURN a.content_hash AS h")
+    assert records[0]["h"] == article_hash(art(1))
+
+
+def test_the_same_article_again_is_unchanged_and_not_duplicated(store: Neo4jStore) -> None:
+    before = store.counts()
+    store.upsert_articles([art(1)])
+    assert store.upsert_articles([art(1)]) == ArticleChanges(unchanged=1)
+    assert delta(before, store.counts())[0] == 1
+
+
+def test_a_modified_article_is_rewritten_in_place(store: Neo4jStore) -> None:
     before = store.counts()
     store.upsert_articles([art(1, "original")])
-    store.upsert_articles([art(1, "changed")])
+    changed = Article("9999.00001", "new title", "new abstract", date(2026, 1, 2), ("cs.AI",), ())
+    assert store.upsert_articles([changed]) == ArticleChanges(modified=1)
     assert delta(before, store.counts())[0] == 1
-    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
-        records, _, _ = driver.execute_query(
-            "MATCH (a:Article {arxiv_id: '9999.00001'}) RETURN a.title AS t"
-        )
-    assert records[0]["t"] == "original1"
+    (record,) = _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) RETURN a")
+    node = record["a"]
+    assert (node["title"], node["abstract"]) == ("new title", "new abstract")
+    assert node["published"].to_native() == date(2026, 1, 2)
+    assert (node["categories"], node["author_names"]) == (["cs.AI"], [])
+    assert node["content_hash"] == article_hash(changed)
+
+
+def test_a_modified_article_keeps_its_authors_and_citations(store: Neo4jStore) -> None:
+    store.upsert_articles([A, B])
+    store.upsert_works(WORKS)
+    store.upsert_citations(REFERENCES)
+    before = store.counts()
+    store.upsert_articles([Article(A.arxiv_id, "other", "other", A.published, (), ())])
+    assert store.counts() == before
+
+
+def test_changes_are_classified_per_article_in_one_batch(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1), art(2)])
+    changed = Article("9999.00002", "x", "y", A.published, (), ())
+    assert store.upsert_articles([art(1), changed, art(3)]) == ArticleChanges(
+        new=1, modified=1, unchanged=1
+    )
+
+
+def test_an_id_repeated_in_a_batch_counts_once(store: Neo4jStore) -> None:
+    assert store.upsert_articles([art(1), art(1)]) == ArticleChanges(new=1)
+
+
+def test_a_stored_article_without_hash_is_stamped_and_unchanged_if_its_text_matches(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1)])
+    _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) REMOVE a.content_hash")
+    assert store.upsert_articles([art(1)]) == ArticleChanges(unchanged=1)
+    records = _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) RETURN a.content_hash AS h")
+    assert records[0]["h"] == article_hash(art(1))
+
+
+def test_a_stored_article_without_hash_is_modified_if_its_text_differs(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1, "old")])
+    _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) REMOVE a.content_hash")
+    assert store.upsert_articles([art(1, "new")]) == ArticleChanges(modified=1)
+
+
+def test_an_unchanged_batch_writes_nothing(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
+    _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) SET a.title = 'edited by hand'")
+    assert store.upsert_articles([art(1)]) == ArticleChanges(unchanged=1)
+    records = _stored("MATCH (a:Article {arxiv_id: '9999.00001'}) RETURN a.title AS t")
+    assert records[0]["t"] == "edited by hand"
 
 
 def test_works_and_citations_build_expected_graph(store: Neo4jStore) -> None:

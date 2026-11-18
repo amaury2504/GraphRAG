@@ -60,7 +60,10 @@ tests/
 # ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
 #                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
 # indexation (morceaux)      : uv run python -m graphrag.cli.index [--limit N] [--batch-size N]
-#                              (titre + morceau → bge-small → Neo4j ; ne traite que les articles sans morceaux)
+#                              (titre + morceau → bge-small → Neo4j ; ne traite que les articles dont le hash
+#                              titre + résumé + version du chunker diffère de celui indexé : nouveaux, modifiés,
+#                              ou chunker changé (CHUNKER_VERSION). Les morceaux orphelins sont supprimés.
+#                              Relancer `ingest` détecte les articles modifiés, puis `index` les ré-indexe.)
 # question (API)             : POST /ask {"question": "...", "configuration": "vector"|"hybrid", "k": 5}  (réponse : + timings)
 #                              (nécessite MISTRAL_API_KEY ; modèle chargé au 1er appel ; doc interactive sur /docs)
 # questions candidates       : uv run python -m graphrag.cli.generate_questions [--per-type 2] [--seed 42] [--style named|descriptive] [--dry-run]

@@ -1,11 +1,14 @@
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from itertools import islice
 from typing import Any
 
 import neo4j
 
+from graphrag.domain.hashing import article_hash, content_hash
 from graphrag.domain.models import (
     Article,
+    ArticleChanges,
+    ArticleIndexState,
     GraphCounts,
     IndexedChunk,
     IndexInfo,
@@ -21,14 +24,21 @@ SCHEMA = (
     "CREATE CONSTRAINT author_key IF NOT EXISTS FOR (a:Author) REQUIRE a.key IS UNIQUE",
 )
 
+STORED_ARTICLE_HASHES = """
+MATCH (a:Article) WHERE a.arxiv_id IN $ids
+RETURN a.arxiv_id AS id, a.content_hash AS hash, a.title AS title, a.abstract AS abstract
+"""
+
+# Rewrites the fields the source provides; authors, citations and chunks are left alone.
 UPSERT_ARTICLES = """
 UNWIND $rows AS row
 MERGE (a:Article {arxiv_id: row.arxiv_id})
-ON CREATE SET a.title = row.title,
-              a.abstract = row.abstract,
-              a.published = date(row.published),
-              a.categories = row.categories,
-              a.author_names = row.author_names
+SET a.title = row.title,
+    a.abstract = row.abstract,
+    a.published = date(row.published),
+    a.categories = row.categories,
+    a.author_names = row.author_names,
+    a.content_hash = row.content_hash
 """
 
 UPSERT_WORKS = """
@@ -100,10 +110,9 @@ SET i.model = $model, i.revision = $revision, i.dimensions = $dimensions,
 """
 VECTOR_INDEX_OPTIONS = "SHOW VECTOR INDEXES YIELD name, options WHERE name = $name RETURN options"
 
-ARTICLES_WITHOUT_CHUNKS = """
+ARTICLES_WITH_INDEX_STATE = """
 MATCH (a:Article)
-WHERE NOT EXISTS { (:Chunk)-[:PART_OF]->(a) }
-RETURN a ORDER BY a.arxiv_id
+RETURN a, a.indexed_hash AS indexed_hash ORDER BY a.arxiv_id
 """
 
 UPSERT_CHUNKS = """
@@ -116,6 +125,21 @@ SET c.arxiv_id = row.arxiv_id,
     c.search_text = row.search_text,
     c.embedding = row.embedding
 MERGE (c)-[:PART_OF]->(a)
+"""
+
+# `articles` rows: {arxiv_id, hash, keys}, with `keys` the keys of the chunks to keep.
+DELETE_ORPHAN_CHUNKS = """
+UNWIND $articles AS art
+MATCH (:Article {arxiv_id: art.arxiv_id})<-[:PART_OF]-(c:Chunk)
+WHERE NOT c.key IN art.keys
+DETACH DELETE c
+RETURN count(c) AS deleted
+"""
+
+MARK_INDEXED = """
+UNWIND $articles AS art
+MATCH (a:Article {arxiv_id: art.arxiv_id})
+SET a.indexed_hash = art.hash
 """
 
 
@@ -172,6 +196,18 @@ def _article(node: Any) -> Article:
     )
 
 
+def _article_row(article: Article, hash_: str) -> dict[str, Any]:
+    return {
+        "arxiv_id": article.arxiv_id,
+        "title": article.title,
+        "abstract": article.abstract,
+        "published": article.published.isoformat(),
+        "categories": list(article.categories),
+        "author_names": list(article.author_names),
+        "content_hash": hash_,
+    }
+
+
 def _chunks(rows: Sequence[dict[str, Any]], size: int) -> Iterator[list[dict[str, Any]]]:
     iterator = iter(rows)
     while chunk := list(islice(iterator, size)):
@@ -196,19 +232,32 @@ class Neo4jStore:
             for statement in SCHEMA:
                 session.run(statement).consume()
 
-    def upsert_articles(self, articles: Sequence[Article]) -> None:
-        rows = [
-            {
-                "arxiv_id": a.arxiv_id,
-                "title": a.title,
-                "abstract": a.abstract,
-                "published": a.published.isoformat(),
-                "categories": list(a.categories),
-                "author_names": list(a.author_names),
+    def upsert_articles(self, articles: Sequence[Article]) -> ArticleChanges:
+        latest = {a.arxiv_id: a for a in articles}  # an id repeated in the batch counts once
+        with self._driver.session() as session:
+            stored = {
+                str(r["id"]): (r["hash"], content_hash(r["title"], r["abstract"]))
+                for r in session.run(STORED_ARTICLE_HASHES, ids=list(latest))
             }
-            for a in articles
-        ]
+        changes = ArticleChanges()
+        rows: list[dict[str, Any]] = []
+        for a in latest.values():
+            current = article_hash(a)
+            if a.arxiv_id not in stored:
+                changes += ArticleChanges(new=1)
+                rows.append(_article_row(a, current))
+                continue
+            recorded, recomputed = stored[a.arxiv_id]
+            # An article stored before hashes existed is compared through its stored text.
+            if (recorded or recomputed) != current:
+                changes += ArticleChanges(modified=1)
+                rows.append(_article_row(a, current))
+            else:
+                changes += ArticleChanges(unchanged=1)
+                if recorded is None:
+                    rows.append(_article_row(a, current))  # same text: only record its hash
         self._write(UPSERT_ARTICLES, rows)
+        return changes
 
     def upsert_works(self, records: Sequence[WorkRecord]) -> None:
         rows = [
@@ -335,12 +384,16 @@ class Neo4jStore:
             result = session.run("MATCH (a:Article) RETURN a ORDER BY a.arxiv_id")
             return [_article(record["a"]) for record in result]
 
-    def articles_without_chunks(self, limit: int | None = None) -> list[Article]:
-        query = ARTICLES_WITHOUT_CHUNKS + (" LIMIT $limit" if limit is not None else "")
+    def articles_with_index_state(self) -> list[ArticleIndexState]:
         with self._driver.session() as session:
-            return [_article(record["a"]) for record in session.run(query, limit=limit)]
+            return [
+                ArticleIndexState(_article(record["a"]), record["indexed_hash"])
+                for record in session.run(ARTICLES_WITH_INDEX_STATE)
+            ]
 
-    def upsert_chunks(self, chunks: Sequence[IndexedChunk]) -> None:
+    def upsert_chunks(
+        self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
+    ) -> int:
         rows = [
             {
                 "key": c.key,
@@ -352,14 +405,29 @@ class Neo4jStore:
             }
             for c in chunks
         ]
-        if not rows:
-            return
+        owners = article_hashes or {}
+        if not rows and not owners:
+            return 0
+        kept: dict[str, list[str]] = {article_id: [] for article_id in owners}
+        for c in chunks:
+            kept.setdefault(c.chunk.arxiv_id, []).append(c.key)
+        articles = [
+            {"arxiv_id": article_id, "hash": owners[article_id], "keys": kept[article_id]}
+            for article_id in owners
+        ]
 
-        def write(tx: neo4j.ManagedTransaction) -> None:
-            tx.run(UPSERT_CHUNKS, rows=rows).consume()
+        def write(tx: neo4j.ManagedTransaction) -> int:
+            if rows:
+                tx.run(UPSERT_CHUNKS, rows=rows).consume()
+            if not articles:
+                return 0
+            record = tx.run(DELETE_ORPHAN_CHUNKS, articles=articles).single()
+            tx.run(MARK_INDEXED, articles=articles).consume()
+            return 0 if record is None else int(record["deleted"])
 
         with self._driver.session() as session:
-            session.execute_write(write)  # one transaction: an article is never half indexed
+            # one transaction: an article is never half indexed, nor half replaced
+            return session.execute_write(write)
 
     def vector_search(self, vector: Sequence[float], k: int) -> list[SearchHit]:
         with self._driver.session() as session:

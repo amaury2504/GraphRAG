@@ -14,9 +14,11 @@ class Neo4jProbe:
             driver.verify_connectivity()
 
     def unindexed_articles(self) -> int:
-        """Articles without chunks: ingested but not searchable until `cli.index` runs."""
+        """Articles never indexed or changed since: `cli.index` has work to do."""
         query = (
-            "MATCH (a:Article) WHERE NOT EXISTS { (:Chunk)-[:PART_OF]->(a) } RETURN count(a) AS n"
+            "MATCH (a:Article) WHERE a.indexed_hash IS NULL "
+            "OR (a.content_hash IS NOT NULL AND a.indexed_hash <> a.content_hash) "
+            "RETURN count(a) AS n"
         )
         with neo4j.GraphDatabase.driver(self._uri, auth=self._auth) as driver:
             records, _, _ = driver.execute_query(query)

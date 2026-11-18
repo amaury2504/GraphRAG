@@ -13,6 +13,28 @@ class Article:
 
 
 @dataclass(frozen=True, slots=True)
+class ArticleChanges:
+    """What storing a batch of articles did: how many were new, rewritten, or already current."""
+
+    new: int = 0
+    modified: int = 0
+    unchanged: int = 0
+
+    def __add__(self, other: ArticleChanges) -> ArticleChanges:
+        return ArticleChanges(
+            self.new + other.new, self.modified + other.modified, self.unchanged + other.unchanged
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArticleIndexState:
+    """An article with the hash it was last indexed from (None if never indexed)."""
+
+    article: Article
+    indexed_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Chunk:
     """A piece of an article's abstract, the unit that gets embedded and searched."""
 

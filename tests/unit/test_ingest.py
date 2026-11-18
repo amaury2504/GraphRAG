@@ -17,11 +17,19 @@ from graphrag.cli.ingest import (
     run_citations,
     run_ingestion,
 )
-from graphrag.domain.models import Article, Author, GraphCounts, ReferenceRecord, WorkRecord
+from graphrag.domain.hashing import article_hash
+from graphrag.domain.models import (
+    Article,
+    ArticleChanges,
+    Author,
+    GraphCounts,
+    ReferenceRecord,
+    WorkRecord,
+)
 
 
-def article(n: int) -> Article:
-    return Article(f"2501.{n:05d}", f"T{n}", "abs", date(2025, 1, 1), ("cs.CL",), ("Ann",))
+def article(n: int, abstract: str = "abs") -> Article:
+    return Article(f"2501.{n:05d}", f"T{n}", abstract, date(2025, 1, 1), ("cs.CL",), ("Ann",))
 
 
 def arxiv_id(n: int) -> str:
@@ -29,15 +37,21 @@ def arxiv_id(n: int) -> str:
 
 
 class FakePapers:
-    def __init__(self, count: int, fail_after: int | None = None) -> None:
+    def __init__(
+        self,
+        count: int,
+        fail_after: int | None = None,
+        abstracts: dict[int, str] | None = None,
+    ) -> None:
         self.count = count
         self.fail_after = fail_after
+        self.abstracts = abstracts or {}
 
     def iter_papers(self, start: date, end: date) -> Iterator[Article]:
         for n in range(1, self.count + 1):
             if self.fail_after is not None and n > self.fail_after:
                 raise RuntimeError("arXiv went away")
-            yield article(n)
+            yield article(n, self.abstracts.get(n, "abs"))
 
 
 def number(identifier: str) -> int:
@@ -81,10 +95,19 @@ class FakeStore:
     def ensure_schema(self) -> None:
         self.events.append("schema")
 
-    def upsert_articles(self, articles: Sequence[Article]) -> None:
+    def upsert_articles(self, articles: Sequence[Article]) -> ArticleChanges:
         self.events.append(f"articles:{len(articles)}")
+        changes = ArticleChanges()
         for a in articles:
-            self.articles.setdefault(a.arxiv_id, a)
+            stored = self.articles.get(a.arxiv_id)
+            if stored is None:
+                changes += ArticleChanges(new=1)
+            elif article_hash(stored) != article_hash(a):
+                changes += ArticleChanges(modified=1)
+            else:
+                changes += ArticleChanges(unchanged=1)
+            self.articles[a.arxiv_id] = a
+        return changes
 
     def upsert_works(self, records: Sequence[WorkRecord]) -> None:
         self.events.append(f"works:{len(records)}")
@@ -132,6 +155,54 @@ def test_full_run_reports_every_gap() -> None:
         ReferenceRecord(arxiv_id(1), (arxiv_id(2),)),
         ReferenceRecord(arxiv_id(3), ()),
     ]
+
+
+def test_first_run_reports_every_article_as_new() -> None:
+    report = run(FakePapers(3), FakeAuthors(set()), FakeCitations({}), FakeStore())
+    assert (report.articles_new, report.articles_modified, report.articles_unchanged) == (3, 0, 0)
+
+
+def test_rerunning_the_same_ingestion_changes_nothing() -> None:
+    store = FakeStore()
+    run(FakePapers(3), FakeAuthors(set()), FakeCitations({}), store)
+    snapshot = dict(store.articles)
+    report = run(FakePapers(3), FakeAuthors(set()), FakeCitations({}), store)
+    assert (report.articles_new, report.articles_modified, report.articles_unchanged) == (0, 0, 3)
+    assert store.articles == snapshot
+
+
+def test_a_changed_abstract_is_reported_as_modified_and_stored() -> None:
+    store = FakeStore()
+    run(FakePapers(3), FakeAuthors(set()), FakeCitations({}), store)
+    papers = FakePapers(3, abstracts={2: "a revised abstract"})
+    report = run(papers, FakeAuthors(set()), FakeCitations({}), store)
+    assert (report.articles_new, report.articles_modified, report.articles_unchanged) == (0, 1, 2)
+    assert store.articles[arxiv_id(2)].abstract == "a revised abstract"
+
+
+def test_changes_are_summed_over_pages() -> None:
+    store = FakeStore()
+    total = ARTICLE_BATCH + 5
+    run(FakePapers(total), FakeAuthors(set()), FakeCitations({}), store)
+    revised = {1: "x", total: "y"}  # one article in each page
+    report = run(FakePapers(total, abstracts=revised), FakeAuthors(set()), FakeCitations({}), store)
+    assert (report.articles_modified, report.articles_unchanged) == (2, total - 2)
+
+
+def test_the_article_log_line_counts_new_and_modified() -> None:
+    store = FakeStore()
+    run(FakePapers(3), FakeAuthors(set()), FakeCitations({}), store)
+    messages: list[str] = []
+    run_ingestion(
+        FakePapers(3, abstracts={1: "x"}),
+        FakeAuthors(set()),
+        FakeCitations({}),
+        store,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        log=messages.append,
+    )
+    assert "articles: 3 fetched (done), 0 new, 1 modified" in messages
 
 
 def test_phases_are_ordered_articles_then_authors_then_citations() -> None:

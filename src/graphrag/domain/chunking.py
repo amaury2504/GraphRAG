@@ -3,6 +3,9 @@ import re
 from graphrag.domain.models import Chunk
 
 DEFAULT_MAX_WORDS = 200
+# Raise it whenever the chunking changes: it is part of every article hash, so all articles
+# are then re-chunked and re-embedded on the next indexing run.
+CHUNKER_VERSION = "1"
 
 # A sentence ends with . ! or ? followed by whitespace and something that looks like a new
 # sentence start. The lookahead avoids cutting on "e.g. the" or "3.5 points".
