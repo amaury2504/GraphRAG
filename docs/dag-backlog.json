@@ -1,0 +1,100 @@
+{
+  "taches": {
+    "t1": {
+      "titre": "T1 Ré-ingestion incrémentale",
+      "contenu": "Identifiants de chunk déterministes, hash d'article (titre + résumé + version du chunker), mise à jour des seuls articles modifiés, suppression des chunks orphelins, idempotence et reprise",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "fait",
+      "pr": 4,
+      "branche": "agent/t1",
+      "worktree": "../GraphRAG-wt/t1"
+    },
+    "t2": {
+      "titre": "T2 Versioning atomique",
+      "contenu": "Chunks immuables partagés, manifeste par version, pointeur de version courante basculé en une opération, rollback",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t2",
+      "worktree": "../GraphRAG-wt/t2"
+    },
+    "t3": {
+      "titre": "T3 Cohérence en lecture",
+      "contenu": "Statuts de version pending, indexed, active ; lisible seulement une fois vecteurs et texte intégral indexés",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t3",
+      "worktree": "../GraphRAG-wt/t3"
+    },
+    "t4": {
+      "titre": "T4 Garbage collection",
+      "contenu": "Mark and sweep des chunks non référencés par une version conservée, durée de rétention, compactage ou reconstruction de l'index vectoriel",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t4",
+      "worktree": "../GraphRAG-wt/t4"
+    },
+    "t5": {
+      "titre": "T5 Versioning du modèle d'embedding",
+      "contenu": "embedding_model et version sur chaque vecteur, nouvel index construit en parallèle, bascule atomique",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t5",
+      "worktree": "../GraphRAG-wt/t5"
+    },
+    "t6": {
+      "titre": "T6 Graphe dérivé à jour",
+      "contenu": "Mise en cohérence des relations, entités ou résumés issus des chunks modifiés ou supprimés",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t6",
+      "worktree": "../GraphRAG-wt/t6"
+    },
+    "t7": {
+      "titre": "T7 Balayage taille de chunk et overlap",
+      "contenu": "Mesurer recall@k et MRR sur eval/ pour plusieurs tailles et recouvrements ; relancer l'évaluation après chaque changement de chunker ou de modèle",
+      "type": "mesure",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t7",
+      "worktree": "../GraphRAG-wt/t7"
+    }
+  },
+  "vagues": [
+    {
+      "vague": 1,
+      "taches": ["t1"],
+      "pourquoi": "Socle : identifiants, hash et suppressions dont toutes les autres tâches dépendent"
+    },
+    {
+      "vague": 2,
+      "taches": ["t2", "t6", "t7"],
+      "pourquoi": "T2 touche le stockage et les manifestes, T6 le graphe dérivé, T7 le découpage et l'évaluation : seules T2 et T6 peuvent se croiser côté Neo4j, risque accepté par l'auteur"
+    },
+    {
+      "vague": 3,
+      "taches": ["t3", "t4"],
+      "pourquoi": "Les deux reposent sur le manifeste de T2 ; T3 touche la lecture, T4 un module de nettoyage. Séparées de T5, qui modifie aussi le stockage"
+    },
+    {
+      "vague": 4,
+      "taches": ["t5"],
+      "pourquoi": "T5 a besoin des statuts de T3 pour basculer l'index"
+    }
+  ],
+  "dependances_precises": {
+    "t1": [],
+    "t2": ["t1"],
+    "t3": ["t2"],
+    "t4": ["t2"],
+    "t5": ["t2", "t3"],
+    "t6": ["t1"],
+    "t7": ["t1"]
+  },
+  "exclues": []
+}

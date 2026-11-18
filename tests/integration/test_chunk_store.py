@@ -16,8 +16,9 @@ from graphrag.adapters.neo4j_store import (
     VECTOR_INDEX,
     Neo4jStore,
 )
-from graphrag.domain.models import Chunk, IndexedChunk, IndexInfo
-from tests.integration.test_neo4j_store import URI, USER, _cleanup, _password, art
+from graphrag.domain.hashing import article_hash
+from graphrag.domain.models import ArticleIndexState, Chunk, IndexedChunk, IndexInfo
+from tests.integration.test_neo4j_store import URI, USER, _cleanup, _password, _stored, art
 
 pytestmark = pytest.mark.integration
 
@@ -77,18 +78,99 @@ def test_chunks_are_linked_to_their_article_and_rewrites_add_nothing(store: Neo4
     ]
 
 
-def test_articles_without_chunks(store: Neo4jStore) -> None:
+def ours(states: list[ArticleIndexState]) -> dict[str, ArticleIndexState]:
+    return {s.article.arxiv_id: s for s in states if s.article.arxiv_id.startswith("9999.")}
+
+
+def test_index_state_lists_articles_with_the_hash_they_were_indexed_from(
+    store: Neo4jStore,
+) -> None:
     store.upsert_articles([art(1), art(2)])
+    store.upsert_chunks([indexed(1, 0, "text", 0)], {"9999.00001": "h1"})
+    states = ours(store.articles_with_index_state())
+    assert list(states) == ["9999.00001", "9999.00002"]  # ordered by id
+    assert states["9999.00001"].indexed_hash == "h1"
+    assert states["9999.00002"].indexed_hash is None
+    assert states["9999.00002"].article == art(2)
+
+
+def test_chunks_written_without_a_hash_leave_the_article_unindexed(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
     store.upsert_chunks([indexed(1, 0, "text", 0)])
-    todo = [a.arxiv_id for a in store.articles_without_chunks() if a.arxiv_id.startswith("9999.")]
-    assert todo == ["9999.00002"]
-    (article,) = [a for a in store.articles_without_chunks() if a.arxiv_id == "9999.00002"]
-    assert article == art(2)
+    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash is None
 
 
-def test_articles_without_chunks_respects_limit(store: Neo4jStore) -> None:
+def keys_of(article_id: str) -> list[str]:
+    records = _stored(
+        "MATCH (c:Chunk)-[:PART_OF]->(:Article {arxiv_id: $id}) RETURN c.key AS k ORDER BY k",
+        id=article_id,
+    )
+    return [r["k"] for r in records]
+
+
+def test_replacing_an_article_deletes_its_orphan_chunks_and_returns_their_count(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1)])
+    three = [indexed(1, p, f"part {p}", p) for p in range(3)]
+    assert store.upsert_chunks(three, {"9999.00001": "h1"}) == 0
+    assert store.upsert_chunks([indexed(1, 0, "only part", 0)], {"9999.00001": "h2"}) == 2
+    assert keys_of("9999.00001") == ["9999.00001#0"]
+    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash == "h2"
+    assert store.chunk_count() >= 1
+
+
+def test_replacing_an_article_rewrites_the_text_of_the_kept_chunks(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "old words", 0)], {"9999.00001": "h1"})
+    store.upsert_chunks([indexed(1, 0, "new words", 1)], {"9999.00001": "h2"})
+    records = _stored("MATCH (c:Chunk {key: '9999.00001#0'}) RETURN c.text AS t")
+    assert records[0]["t"] == "new words"
+
+
+def test_an_article_emptied_by_a_replacement_loses_every_chunk(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "a", 0), indexed(1, 1, "b", 1)], {"9999.00001": "h1"})
+    assert store.upsert_chunks([], {"9999.00001": "h2"}) == 2
+    assert keys_of("9999.00001") == []
+    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash == "h2"
+
+
+def test_replacing_one_article_leaves_the_others_alone(store: Neo4jStore) -> None:
     store.upsert_articles([art(1), art(2)])
-    assert len(store.articles_without_chunks(limit=1)) == 1
+    store.upsert_chunks(
+        [
+            indexed(1, 0, "a", 0),
+            indexed(1, 1, "b", 1),
+            indexed(2, 0, "c", 2),
+            indexed(2, 1, "d", 3),
+        ],
+        {"9999.00001": "h1", "9999.00002": "h2"},
+    )
+    store.upsert_chunks([indexed(1, 0, "a", 0)], {"9999.00001": "h1b"})
+    assert keys_of("9999.00002") == ["9999.00002#0", "9999.00002#1"]
+    assert ours(store.articles_with_index_state())["9999.00002"].indexed_hash == "h2"
+
+
+def test_a_failed_replacement_changes_nothing(
+    store: Neo4jStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "a", 0), indexed(1, 1, "b", 1)], {"9999.00001": "h1"})
+    # The last statement of the transaction fails, after the chunks were rewritten and the
+    # orphan deleted: all of it must be rolled back.
+    monkeypatch.setattr("graphrag.adapters.neo4j_store.MARK_INDEXED", "NOT CYPHER")
+    with pytest.raises(neo4j.exceptions.Neo4jError):
+        store.upsert_chunks([indexed(1, 0, "rewritten", 5)], {"9999.00001": "h2"})
+    assert keys_of("9999.00001") == ["9999.00001#0", "9999.00001#1"]
+    records = _stored("MATCH (c:Chunk {key: '9999.00001#0'}) RETURN c.text AS t")
+    assert records[0]["t"] == "a"
+    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash == "h1"
+
+
+def test_no_rows_and_no_hashes_is_a_noop(store: Neo4jStore) -> None:
+    assert store.upsert_chunks([]) == 0
+    assert store.upsert_chunks([], {}) == 0
 
 
 def test_vector_index_finds_the_nearest_chunk(store: Neo4jStore) -> None:
@@ -256,5 +338,26 @@ def test_the_probe_counts_articles_without_chunks(store: Neo4jStore) -> None:
     before = probe.unindexed_articles()
     store.upsert_articles([art(1), art(2)])
     assert probe.unindexed_articles() == before + 2
-    store.upsert_chunks([indexed(1, 0, "some text", 0)])
+    store.upsert_chunks([indexed(1, 0, "some text", 0)], {"9999.00001": article_hash(art(1))})
     assert probe.unindexed_articles() == before + 1
+
+
+def test_the_probe_counts_an_article_modified_after_indexing(store: Neo4jStore) -> None:
+    from graphrag.adapters.health import Neo4jProbe
+
+    probe = Neo4jProbe(URI, USER, _password())
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "some text", 0)], {"9999.00001": article_hash(art(1))})
+    before = probe.unindexed_articles()
+    store.upsert_articles([art(1, "changed")])
+    assert probe.unindexed_articles() == before + 1
+
+
+def test_the_probe_counts_chunks_written_without_a_hash(store: Neo4jStore) -> None:
+    from graphrag.adapters.health import Neo4jProbe
+
+    probe = Neo4jProbe(URI, USER, _password())
+    store.upsert_articles([art(1)])
+    before = probe.unindexed_articles()
+    store.upsert_chunks([indexed(1, 0, "some text", 0)])
+    assert probe.unindexed_articles() == before  # chunks alone do not make it current

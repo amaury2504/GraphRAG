@@ -1,7 +1,7 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from graphrag.domain.models import Article, IndexedChunk, IndexInfo
+from graphrag.domain.models import ArticleIndexState, IndexedChunk, IndexInfo
 
 
 class ChunkStore(Protocol):
@@ -16,12 +16,20 @@ class ChunkStore(Protocol):
         """Record what the vectors are built with, or fail if another model/template is recorded."""
         ...
 
-    def articles_without_chunks(self, limit: int | None = None) -> list[Article]:
-        """Articles that have no chunk yet, ordered by arXiv id."""
+    def articles_with_index_state(self) -> list[ArticleIndexState]:
+        """Every article with the hash it was last indexed from, ordered by arXiv id."""
         ...
 
-    def upsert_chunks(self, chunks: Sequence[IndexedChunk]) -> None:
-        """Write the chunks and their PART_OF relations in one transaction. Idempotent."""
+    def upsert_chunks(
+        self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
+    ) -> int:
+        """Write the chunks and their PART_OF relations in one transaction. Idempotent.
+
+        With `article_hashes` (arXiv id -> hash the chunks were built from), each listed
+        article is replaced as a whole in the same transaction: its chunks that are not in
+        `chunks` are deleted, and the hash is recorded as indexed. An article with no chunk
+        in `chunks` is thereby emptied. Returns how many chunks were deleted.
+        """
         ...
 
     def chunk_count(self) -> int: ...

@@ -2,7 +2,13 @@ from collections.abc import Iterator, Sequence
 from datetime import date
 from typing import Protocol
 
-from graphrag.domain.models import Article, GraphCounts, ReferenceRecord, WorkRecord
+from graphrag.domain.models import (
+    Article,
+    ArticleChanges,
+    GraphCounts,
+    ReferenceRecord,
+    WorkRecord,
+)
 
 
 class PaperSource(Protocol):
@@ -26,8 +32,12 @@ class CitationSource(Protocol):
 class GraphStore(Protocol):
     def ensure_schema(self) -> None: ...
 
-    def upsert_articles(self, articles: Sequence[Article]) -> None:
-        """Insert articles not yet present; existing ones are left untouched."""
+    def upsert_articles(self, articles: Sequence[Article]) -> ArticleChanges:
+        """Insert new articles and rewrite those whose hash differs from the stored one.
+
+        Articles with the same hash are left as they are. Returns how many were new,
+        modified and unchanged. Authors, citations and chunks are not touched here.
+        """
         ...
 
     def upsert_works(self, records: Sequence[WorkRecord]) -> None:
