@@ -17,10 +17,9 @@ jobs:
         with:
           version: "0.12.10"
       - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
-      - run: uv run pytest
+      # Lint, format, types, tests avec couverture, anti-contournement : une seule commande, la même
+      # qu'en local. La mutation n'est pas lancée ici ; gitleaks a son workflow (pr-checks.yml).
+      - run: uv run python scripts/gates.py --skip mutation --skip gitleaks
 
   integration:
     runs-on: ubuntu-latest

@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import chain, zip_longest
-from typing import Any, cast
+from typing import Any
 
 from graphrag.domain.chunking import search_text
 from graphrag.domain.evaluation import QUESTION_TYPES, QuestionStyle, QuestionType
@@ -256,7 +256,7 @@ def parse_generation(text: str) -> tuple[str, str]:
         raise ValueError(f"invalid JSON in the reply: {exc.msg}") from None
     if not isinstance(data, dict):
         raise ValueError("the reply is not a JSON object")
-    fields = cast("dict[str, Any]", data)
+    fields: dict[str, Any] = {str(key): value for key, value in data.items()}
     if "skip" in fields:
         raise UnrelatedArticlesError(f"no specific shared subject: {fields['skip']}")
     question, answer = fields.get("question"), fields.get("expected_answer")
