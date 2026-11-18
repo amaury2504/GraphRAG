@@ -1,0 +1,12 @@
+{
+  "repo": "amaury2504/GraphRAG",
+  "base_branch": "main",
+  "backlog": "docs/backlog.md",
+  "backlog_section": "À faire",
+  "dag": "docs/dag-backlog.json",
+  "worktree_root": "../GraphRAG-wt",
+  "branch_prefix": "agent/",
+  "gate": "uv run python scripts/gates.py --skip mutation --skip gitleaks",
+  "merge_method": "squash",
+  "wave_size": 10
+}
