@@ -52,7 +52,8 @@
       "contenu": "Mise en cohérence des relations, entités ou résumés issus des chunks modifiés ou supprimés",
       "type": "code",
       "source": "docs/backlog.md",
-      "etat": "a-faire",
+      "etat": "fait",
+      "pr": 7,
       "branche": "agent/t6",
       "worktree": "../GraphRAG-wt/t6"
     },

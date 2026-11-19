@@ -103,7 +103,7 @@ class FakeStore:
             if stored is None:
                 changes += ArticleChanges(new=1)
             elif article_hash(stored) != article_hash(a):
-                changes += ArticleChanges(modified=1)
+                changes += ArticleChanges(modified=1, modified_ids=(a.arxiv_id,))
             else:
                 changes += ArticleChanges(unchanged=1)
             self.articles[a.arxiv_id] = a
@@ -115,6 +115,9 @@ class FakeStore:
     def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
         self.events.append(f"cites:{len(records)}")
         self.cited.extend(records)
+
+    def delete_article(self, arxiv_id: str) -> bool:
+        return self.articles.pop(arxiv_id, None) is not None
 
     def article_ids(self) -> list[str]:
         return sorted(self.articles)
@@ -420,6 +423,9 @@ class FakeLedger:
         self.marks.append(list(arxiv_ids))
         self.done.update(arxiv_ids)
 
+    def forget(self, arxiv_ids: Sequence[str]) -> None:
+        self.done.difference_update(arxiv_ids)
+
 
 def stored(count: int) -> FakeStore:
     store = FakeStore()
@@ -534,6 +540,8 @@ def test_recheck_ledger_forgets_but_still_records() -> None:
     assert ledger.checked() == set()
     ledger.mark([arxiv_id(2)])
     assert inner.done == {arxiv_id(1), arxiv_id(2)}
+    ledger.forget([arxiv_id(1)])
+    assert inner.done == {arxiv_id(2)}
     assert make_ledger(False, inner) is inner
 
 
@@ -550,3 +558,38 @@ def test_ledger_from_args_honours_recheck(tmp_path: Path, argv: list[str], remem
     assert ledger.checked() == ({arxiv_id(1)} if remembers else set())
     ledger.mark([arxiv_id(2)])
     assert arxiv_id(2) in path.read_text(encoding="utf-8")
+
+
+def test_a_modified_article_is_forgotten_by_the_ledger_and_looked_up_again() -> None:
+    store = FakeStore()
+    store.upsert_articles([article(1), article(2)])
+    ledger = FakeLedger({arxiv_id(1), arxiv_id(2)})
+    citations = FakeCitations({})
+    run_ingestion(
+        FakePapers(2, abstracts={1: "rewritten"}),
+        FakeAuthors(set()),
+        citations,
+        store,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        ledger=ledger,
+        log=lambda _m: None,
+    )
+    assert citations.calls == [1]  # only the modified article is looked up again
+
+
+def test_an_unchanged_article_stays_in_the_ledger() -> None:
+    store = FakeStore()
+    store.upsert_articles([article(1)])
+    ledger = FakeLedger({arxiv_id(1)})
+    run_ingestion(
+        FakePapers(1),
+        FakeAuthors(set()),
+        FakeCitations({}),
+        store,
+        date(2025, 1, 1),
+        date(2025, 12, 31),
+        ledger=ledger,
+        log=lambda _m: None,
+    )
+    assert ledger.done == {arxiv_id(1)}

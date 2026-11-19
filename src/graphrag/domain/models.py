@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from graphrag.domain.versioning import chunk_key
@@ -21,10 +21,15 @@ class ArticleChanges:
     new: int = 0
     modified: int = 0
     unchanged: int = 0
+    # which ones were modified; informative, so the counts alone decide equality
+    modified_ids: tuple[str, ...] = field(default=(), compare=False)
 
     def __add__(self, other: ArticleChanges) -> ArticleChanges:
         return ArticleChanges(
-            self.new + other.new, self.modified + other.modified, self.unchanged + other.unchanged
+            self.new + other.new,
+            self.modified + other.modified,
+            self.unchanged + other.unchanged,
+            self.modified_ids + other.modified_ids,
         )
 
 
