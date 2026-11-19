@@ -3,10 +3,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from graphrag.cli.index import _parse_args, index_articles, run_indexing, run_rollback
+from graphrag.cli.index import _parse_args, index_articles, run_gc, run_indexing, run_rollback
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
-from graphrag.domain.versioning import VersionInfo
+from graphrag.domain.versioning import GcReport, VersionInfo
 
 
 def article(n: int, abstract: str = "One sentence.", title: str = "Title") -> Article:
@@ -74,6 +74,9 @@ class FakeChunkStore:
 
     def rollback(self) -> VersionInfo:
         raise NotImplementedError  # the indexing pipeline never rolls back
+
+    def collect_garbage(self, *, keep: int, min_age_days: int, apply: bool) -> GcReport:
+        raise NotImplementedError  # the indexing pipeline never collects garbage
 
     def _info(self, index: int) -> VersionInfo:
         created = datetime(2026, 11, 18, tzinfo=UTC)
@@ -340,3 +343,64 @@ def test_nothing_is_logged_about_a_version_when_none_is_published() -> None:
     lines: list[str] = []
     run_indexing(store, FakeEmbedder(), log=lines.append)
     assert lines == ["chunks: 0 articles to index"]
+
+
+def test_the_gc_options_default_to_a_dry_run_keeping_three_versions() -> None:
+    args = _parse_args(["--gc"])
+    assert (args.gc, args.keep, args.min_age_days, args.apply) == (True, 3, 0, False)
+
+
+def test_the_gc_is_off_by_default() -> None:
+    assert _parse_args([]).gc is False
+
+
+@pytest.mark.parametrize("option", [["--apply"], ["--keep", "4"], ["--min-age-days", "1"]])
+def test_gc_tuning_options_without_gc_are_refused(option: list[str]) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        _parse_args(option)
+
+
+def test_gc_and_rollback_cannot_be_combined() -> None:
+    with pytest.raises(SystemExit, match="2"):
+        _parse_args(["--gc", "--rollback"])
+
+
+class Collecting(FakeChunkStore):
+    def __init__(self, report: GcReport) -> None:
+        super().__init__([])
+        self.report = report
+        self.calls: list[tuple[int, int, bool]] = []
+
+    def collect_garbage(self, *, keep: int, min_age_days: int, apply: bool) -> GcReport:
+        self.calls.append((keep, min_age_days, apply))
+        return self.report
+
+
+def test_a_dry_run_is_delegated_to_the_store_and_announces_what_would_go() -> None:
+    store = Collecting(GcReport((5, 4, 3), (2, 1), 40, applied=False))
+    lines: list[str] = []
+    report = run_gc(store, keep=3, min_age_days=7, apply=False, log=lines.append)
+    assert report is store.report
+    assert store.calls == [(3, 7, False)]
+    assert lines == [
+        "gc: dry run, versions kept 5, 4, 3",
+        "gc: would drop 2 versions (2, 1) and 40 chunks, rerun with --apply to delete",
+    ]
+
+
+def test_an_applied_collection_announces_what_was_deleted() -> None:
+    store = Collecting(GcReport((5, 4), (3,), 12, applied=True))
+    lines: list[str] = []
+    run_gc(store, keep=2, min_age_days=0, apply=True, log=lines.append)
+    assert store.calls == [(2, 0, True)]
+    assert lines == [
+        "gc: versions kept 5, 4",
+        "gc: dropped 1 version (3) and 12 chunks",
+    ]
+
+
+def test_a_collection_with_nothing_to_remove_says_so() -> None:
+    store = Collecting(GcReport((2, 1), (), 0, applied=True))
+    lines: list[str] = []
+    run_gc(store, keep=3, min_age_days=0, apply=True, log=lines.append)
+    assert lines[-1] == "gc: nothing to remove"

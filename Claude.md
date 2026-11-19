@@ -66,9 +66,15 @@ tests/
 #                              Les morceaux sont immuables (clé = article#position#empreinte du texte) et jamais
 #                              supprimés ; la recherche ne lit que la version courante, un instantané du corpus
 #                              publié en fin de run (nœuds Version, pointeur Current, bascule en une transaction).
-#                              --rollback : revient à la version précédente, sans indexer. Le ramasse-miettes
-#                              des morceaux non référencés viendra avec T4.
+#                              --rollback : revient à la version précédente, sans indexer.
+#                              --gc [--keep N] [--min-age-days D] [--apply] : ramasse-miettes (mark and sweep),
+#                              sans indexer ni charger le modèle. Simulation par défaut ; --apply supprime les
+#                              versions au-delà des N plus récentes (défaut 3, minimum 2, sauf celles de moins de
+#                              D jours) puis les morceaux hors de toute version gardée et hors des morceaux que
+#                              chaque article prépare pour la prochaine version (donc sans risque pendant un `index`).
+#                              Code retour 2 si aucune version n'est publiée ou si --keep < 2.)
 #                              Relancer `ingest` détecte les articles modifiés, puis `index` les ré-indexe.)
+# LLM de /ask               : LLM_PROVIDER=mistral (défaut) | claude (commande locale `claude -p`, usage personnel, pas dans Docker)
 # question (API)             : POST /ask {"question": "...", "configuration": "vector"|"hybrid", "k": 5}  (réponse : + timings)
 #                              (nécessite MISTRAL_API_KEY ; modèle chargé au 1er appel ; doc interactive sur /docs)
 # questions candidates       : uv run python -m graphrag.cli.generate_questions [--per-type 2] [--seed 42] [--style named|descriptive] [--dry-run]
