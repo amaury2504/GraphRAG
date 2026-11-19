@@ -26,6 +26,7 @@
       "type": "code",
       "source": "docs/backlog.md",
       "etat": "fait",
+      "pr": 10,
       "branche": "agent/t3",
       "worktree": "../GraphRAG-wt/t3"
     },
