@@ -108,7 +108,7 @@ def test_all_articles_returns_complete_articles_in_id_order(store: Neo4jStore) -
     assert ours == [art(1), art(2)]
 
 
-def _stored(query: str, **params: str) -> list[neo4j.Record]:
+def _stored(query: str, **params: str | int) -> list[neo4j.Record]:
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
         records, _, _ = driver.execute_query(query, parameters_=dict(params))
     return list(records)
@@ -358,7 +358,7 @@ def test_an_empty_reference_list_removes_every_citation_of_that_article(
     assert _cited_by(B.arxiv_id) == [C.arxiv_id]  # another article's citations are untouched
 
 
-def test_deleting_an_article_removes_its_chunks_relations_and_orphan_authors(
+def test_deleting_an_article_removes_its_relations_and_orphan_authors(
     store: Neo4jStore,
 ) -> None:
     store.upsert_articles([A, B, C])

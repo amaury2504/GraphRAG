@@ -59,10 +59,15 @@ tests/
 # gates (comme la CI)        : uv run python scripts/gates.py --skip mutation --skip gitleaks
 # ingestion                  : uv run python -m graphrag.cli.ingest [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--limit N]
 #                              [--citations-only] [--recheck-citations]  (exit 3 = citation batches skipped, rerun later)
-# indexation (morceaux)      : uv run python -m graphrag.cli.index [--limit N] [--batch-size N]
+# indexation (morceaux)      : uv run python -m graphrag.cli.index [--limit N] [--batch-size N] [--rollback]
 #                              (titre + morceau → bge-small → Neo4j ; ne traite que les articles dont le hash
 #                              titre + résumé + version du chunker diffère de celui indexé : nouveaux, modifiés,
-#                              ou chunker changé (CHUNKER_VERSION). Les morceaux orphelins sont supprimés.
+#                              ou chunker changé (CHUNKER_VERSION).
+#                              Les morceaux sont immuables (clé = article#position#empreinte du texte) et jamais
+#                              supprimés ; la recherche ne lit que la version courante, un instantané du corpus
+#                              publié en fin de run (nœuds Version, pointeur Current, bascule en une transaction).
+#                              --rollback : revient à la version précédente, sans indexer. Le ramasse-miettes
+#                              des morceaux non référencés viendra avec T4.
 #                              Relancer `ingest` détecte les articles modifiés, puis `index` les ré-indexe.)
 # question (API)             : POST /ask {"question": "...", "configuration": "vector"|"hybrid", "k": 5}  (réponse : + timings)
 #                              (nécessite MISTRAL_API_KEY ; modèle chargé au 1er appel ; doc interactive sur /docs)

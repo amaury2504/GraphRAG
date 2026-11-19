@@ -15,7 +15,8 @@
       "contenu": "Chunks immuables partagés, manifeste par version, pointeur de version courante basculé en une opération, rollback",
       "type": "code",
       "source": "docs/backlog.md",
-      "etat": "a-faire",
+      "etat": "fait",
+      "pr": 6,
       "branche": "agent/t2",
       "worktree": "../GraphRAG-wt/t2"
     },

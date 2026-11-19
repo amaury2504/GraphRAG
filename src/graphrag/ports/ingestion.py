@@ -56,7 +56,10 @@ class GraphStore(Protocol):
         ...
 
     def delete_article(self, arxiv_id: str) -> bool:
-        """Remove an article with its chunks, its CITES (both ways) and its orphan authors.
+        """Remove an article, its CITES (both ways) and its orphan authors.
+
+        Its chunks are immutable and kept by older versions: they are only detached from the
+        article, so no search returns them, and collected later.
 
         Returns False if the article was not stored.
         """

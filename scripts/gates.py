@@ -1,6 +1,9 @@
 """Point d'entrée des gates : appelé par le hook de commit ET par la CI (source unique).
 
-Usage : python scripts/gates.py [--only NOM | --skip NOM ...] [--mutation changed|full]
+Usage : python scripts/gates.py [--only NOM | --skip NOM ...] [--with-mutation]
+        [--mutation changed|full]
+
+La mutation est facultative : elle ne tourne que sur demande (--with-mutation ou --only mutation).
 
 La logique (rapport, runner, gate mutation) vit dans `devgates`. Ce fichier ne fait que le
 câblage : catalogue des gates et exécuteurs de commandes réels. Les gates lint/format/types/tests
@@ -263,7 +266,7 @@ def main() -> int:
         action="append",
         default=[],
         choices=names,
-        help="gate à ignorer (répétable) ; le hook et la CI ignorent la mutation (A-37)",
+        help="gate à ignorer (répétable) ",
     )
     parser.add_argument(
         "--mutation",
@@ -278,11 +281,19 @@ def main() -> int:
         help="motif de mutants (répétable), par exemple app.module.* : "
         "remplace la sélection par git, pour revérifier un fichier sans refaire les autres",
     )
+    parser.add_argument(
+        "--with-mutation",
+        action="store_true",
+        help="inclure la mutation (ignorée par défaut ; implicite avec --only mutation)",
+    )
     args = parser.parse_args()
+    skip: list[str] = list(args.skip)
+    if args.only is None and not args.with_mutation and "mutation" not in skip:
+        skip.append("mutation")
     try:
         with run_lock(LOCK_PATH, os.getpid(), process_alive):
             report = run_gates(
-                build_gates(args.mutation, args.mutation_target), only=args.only, skip=args.skip
+                build_gates(args.mutation, args.mutation_target), only=args.only, skip=skip
             )
     except (UnknownGateError, InvalidGateSelectionError, RunLockedError) as exc:
         parser.error(str(exc))
