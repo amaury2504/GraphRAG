@@ -95,6 +95,10 @@ def run_ingestion(
         changes += store.upsert_articles(batch)
     log(f"articles: {fetched} fetched (done), {changes.new} new, {changes.modified} modified")
 
+    # A modified article may have new references: look them up again (authors always are).
+    if ledger is not None:
+        ledger.forget(changes.modified_ids)
+
     # Phase 2: authors and citations for the whole stored corpus, so reruns stay consistent.
     ids = store.article_ids()
     works: list[WorkRecord] = []
@@ -200,6 +204,9 @@ class RecheckLedger:
 
     def mark(self, arxiv_ids: Sequence[str]) -> None:
         self._inner.mark(arxiv_ids)
+
+    def forget(self, arxiv_ids: Sequence[str]) -> None:
+        self._inner.forget(arxiv_ids)
 
 
 def make_ledger(recheck: bool, inner: CitationLedger) -> CitationLedger:
