@@ -3,7 +3,13 @@ from datetime import UTC, datetime
 import pytest
 
 from graphrag.domain.models import Chunk, IndexedChunk
-from graphrag.domain.versioning import VersionInfo, chunk_key
+from graphrag.domain.versioning import (
+    VersionInfo,
+    VersionNotReadyError,
+    VersionStatus,
+    chunk_key,
+    ensure_indexed,
+)
 
 
 def test_the_key_is_deterministic() -> None:
@@ -35,3 +41,42 @@ def test_a_version_describes_itself() -> None:
     created = datetime(2026, 11, 18, tzinfo=UTC)
     info = VersionInfo(id=2, created_at=created, chunk_count=10)
     assert (info.id, info.created_at, info.chunk_count) == (2, created, 10)
+
+
+def test_a_version_carries_one_of_three_statuses_and_is_active_by_default() -> None:
+    created = datetime(2026, 11, 18, tzinfo=UTC)
+    assert VersionInfo(1, created, 0).status is VersionStatus.ACTIVE
+    assert [s.value for s in VersionStatus] == ["pending", "indexed", "active"]
+    assert VersionInfo(1, created, 0, VersionStatus.PENDING).status is VersionStatus.PENDING
+
+
+def test_a_version_not_ready_names_the_version_and_the_missing_part() -> None:
+    error = VersionNotReadyError(4, "3 of 5 chunks have no vector")
+    assert error.version_id == 4
+    assert str(error) == "version 4 is not ready to be read: 3 of 5 chunks have no vector"
+
+
+def test_a_version_whose_chunks_are_all_in_both_indexes_is_ready() -> None:
+    ensure_indexed(4, chunks=5, with_vector=5, with_text=5)
+    ensure_indexed(5, chunks=0, with_vector=0, with_text=0)  # an empty corpus is a valid version
+
+
+@pytest.mark.parametrize(
+    ("with_vector", "with_text", "message"),
+    [
+        (3, 5, "2 of 5 chunks are not in the vector index"),
+        (5, 1, "4 of 5 chunks are not in the full-text index"),
+        (
+            0,
+            0,
+            "5 of 5 chunks are not in the vector index; "
+            "5 of 5 chunks are not in the full-text index",
+        ),
+    ],
+)
+def test_a_version_with_chunks_missing_from_an_index_is_refused(
+    with_vector: int, with_text: int, message: str
+) -> None:
+    with pytest.raises(VersionNotReadyError) as raised:
+        ensure_indexed(4, chunks=5, with_vector=with_vector, with_text=with_text)
+    assert str(raised.value) == f"version 4 is not ready to be read: {message}"

@@ -6,7 +6,7 @@ import pytest
 from graphrag.cli.index import _parse_args, index_articles, run_indexing, run_rollback
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
-from graphrag.domain.versioning import VersionInfo
+from graphrag.domain.versioning import VersionInfo, VersionNotReadyError
 
 
 def article(n: int, abstract: str = "One sentence.", title: str = "Title") -> Article:
@@ -169,7 +169,7 @@ def test_progress_is_logged_per_batch() -> None:
         "chunks: 3 articles to index",
         "chunks: 2/3 articles indexed, 2 chunks",
         "chunks: 3/3 articles indexed, 3 chunks",
-        "chunks: version 1 published (3 chunks)",
+        "chunks: version 1 published (3 chunks, active)",
     ]
 
 
@@ -315,7 +315,18 @@ def test_a_database_without_any_version_gets_its_first_one_even_with_nothing_to_
 def test_the_log_announces_the_published_version() -> None:
     lines: list[str] = []
     run_indexing(FakeChunkStore([article(1)]), FakeEmbedder(), log=lines.append)
-    assert lines[-1] == "chunks: version 1 published (1 chunks)"
+    assert lines[-1] == "chunks: version 1 published (1 chunks, active)"
+
+
+def test_a_version_the_indexes_do_not_cover_stops_the_run_and_publishes_nothing() -> None:
+    class Uncovered(FakeChunkStore):
+        def publish_version(self) -> VersionInfo:
+            raise VersionNotReadyError(1, "1 of 1 chunks are not in the vector index")
+
+    lines: list[str] = []
+    with pytest.raises(VersionNotReadyError, match="not ready to be read"):
+        run_indexing(Uncovered([article(1)]), FakeEmbedder(), log=lines.append)
+    assert lines[-1] == "chunks: 1/1 articles indexed, 1 chunks"  # no "published" line
 
 
 def test_the_rollback_option_is_off_by_default() -> None:
@@ -331,7 +342,7 @@ def test_a_rollback_is_delegated_to_the_store_and_logged() -> None:
     lines: list[str] = []
     version = run_rollback(RollingBack([]), log=lines.append)
     assert version.id == 1
-    assert lines == ["chunks: rolled back to version 1 (7 chunks)"]
+    assert lines == ["chunks: rolled back to version 1 (7 chunks, active)"]
 
 
 def test_nothing_is_logged_about_a_version_when_none_is_published() -> None:

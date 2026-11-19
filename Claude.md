@@ -66,7 +66,10 @@ tests/
 #                              Les morceaux sont immuables (clé = article#position#empreinte du texte) et jamais
 #                              supprimés ; la recherche ne lit que la version courante, un instantané du corpus
 #                              publié en fin de run (nœuds Version, pointeur Current, bascule en une transaction).
-#                              --rollback : revient à la version précédente, sans indexer. Le ramasse-miettes
+#                              Statuts d'une version : pending (manifeste en construction) → indexed (index vectoriel
+#                              et texte intégral en ligne et couvrant tous ses morceaux, sinon exit 4 et la version
+#                              active ne change pas) → active (pointée par Current, seule lisible).
+#                              --rollback : revient à la version indexed précédente, sans indexer. Le ramasse-miettes
 #                              des morceaux non référencés viendra avec T4.
 #                              Relancer `ingest` détecte les articles modifiés, puis `index` les ré-indexe.)
 # question (API)             : POST /ask {"question": "...", "configuration": "vector"|"hybrid", "k": 5}  (réponse : + timings)

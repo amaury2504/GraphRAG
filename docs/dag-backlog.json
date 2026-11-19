@@ -25,7 +25,7 @@
       "contenu": "Statuts de version pending, indexed, active ; lisible seulement une fois vecteurs et texte intégral indexés",
       "type": "code",
       "source": "docs/backlog.md",
-      "etat": "a-faire",
+      "etat": "fait",
       "branche": "agent/t3",
       "worktree": "../GraphRAG-wt/t3"
     },

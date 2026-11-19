@@ -8,7 +8,7 @@ import pytest
 
 import graphrag.cli.index as index_cli
 from graphrag.domain.models import IndexInfo
-from graphrag.domain.versioning import VersionInfo
+from graphrag.domain.versioning import VersionInfo, VersionNotReadyError
 
 VERSION = VersionInfo(3, datetime(2026, 11, 18, tzinfo=UTC), 12)
 
@@ -70,6 +70,24 @@ def test_rollback_with_nothing_to_go_back_to_exits_with_2(
     monkeypatch.setattr(index_cli, "log_line", lines.append)
     assert index_cli.main(["--rollback"]) == 2
     assert lines == ["chunks: no earlier version to roll back to"]
+
+
+def test_a_version_the_indexes_do_not_cover_exits_with_4_and_says_why(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> index_cli.IndexReport:
+        raise VersionNotReadyError(5, "2 of 9 chunks are not in the vector index")
+
+    lines: list[str] = []
+    monkeypatch.setattr(index_cli, "log_line", lines.append)
+    monkeypatch.setattr(index_cli, "load_default_embedder", StubEmbedder)
+    monkeypatch.setattr(index_cli, "default_index_info", lambda _dimensions: None)
+    monkeypatch.setattr(index_cli, "run_indexing", refuse)
+    assert index_cli.main([]) == 4
+    assert lines[-1] == (
+        "chunks: version 5 is not ready to be read: 2 of 9 chunks are not in the vector index; "
+        "the active version is unchanged, run again to build a new one"
+    )
 
 
 def test_indexing_runs_with_the_embedder_and_prints_the_report(
