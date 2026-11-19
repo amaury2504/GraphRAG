@@ -53,6 +53,44 @@ MERGE (a)-[r:AUTHORED_BY]->(p)
 SET r.position = author.position
 """
 
+# Run after UPSERT_WORKS: relations to authors a record no longer lists, then the authors
+# left with no article (only those just detached, never a global sweep).
+PRUNE_AUTHORS = """
+UNWIND $rows AS row
+MATCH (:Article {arxiv_id: row.arxiv_id})-[r:AUTHORED_BY]->(p:Author)
+WHERE NOT p.key IN [author IN row.authors | author.key]
+DELETE r
+WITH DISTINCT p
+WHERE NOT EXISTS { (p)<-[:AUTHORED_BY]-() }
+DELETE p
+"""
+
+# Run before UPSERT_CITATIONS: an empty `cited` list removes every outgoing CITES.
+PRUNE_CITATIONS = """
+UNWIND $rows AS row
+MATCH (:Article {arxiv_id: row.arxiv_id})-[r:CITES]->(t:Article)
+WHERE NOT t.arxiv_id IN row.cited
+DELETE r
+"""
+
+AUTHORS_OF_ARTICLE = """
+MATCH (a:Article {arxiv_id: $id})
+OPTIONAL MATCH (a)-[:AUTHORED_BY]->(p:Author)
+RETURN count(DISTINCT a) AS n, collect(p.key) AS keys
+"""
+
+DELETE_ARTICLE = """
+MATCH (a:Article {arxiv_id: $id})
+OPTIONAL MATCH (c:Chunk)-[:PART_OF]->(a)
+DETACH DELETE c, a
+"""
+
+DELETE_ORPHAN_AUTHORS = """
+MATCH (p:Author)
+WHERE p.key IN $keys AND NOT EXISTS { (p)<-[:AUTHORED_BY]-() }
+DELETE p
+"""
+
 UPSERT_CITATIONS = """
 UNWIND $rows AS row
 MATCH (s:Article {arxiv_id: row.arxiv_id})
@@ -250,13 +288,13 @@ class Neo4jStore:
             recorded, recomputed = stored[a.arxiv_id]
             # An article stored before hashes existed is compared through its stored text.
             if (recorded or recomputed) != current:
-                changes += ArticleChanges(modified=1)
+                changes += ArticleChanges(modified=1, modified_ids=(a.arxiv_id,))
                 rows.append(_article_row(a, current))
             else:
                 changes += ArticleChanges(unchanged=1)
                 if recorded is None:
                     rows.append(_article_row(a, current))  # same text: only record its hash
-        self._write(UPSERT_ARTICLES, rows)
+        self._write(rows, UPSERT_ARTICLES)
         return changes
 
     def upsert_works(self, records: Sequence[WorkRecord]) -> None:
@@ -270,11 +308,11 @@ class Neo4jStore:
             }
             for r in records
         ]
-        self._write(UPSERT_WORKS, rows)
+        self._write(rows, UPSERT_WORKS, PRUNE_AUTHORS)
 
     def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
         rows = [{"arxiv_id": r.arxiv_id, "cited": list(r.cited_arxiv_ids)} for r in records]
-        self._write(UPSERT_CITATIONS, rows)
+        self._write(rows, PRUNE_CITATIONS, UPSERT_CITATIONS)
 
     def article_ids(self) -> list[str]:
         with self._driver.session() as session:
@@ -447,9 +485,24 @@ class Neo4jStore:
             record = session.run("MATCH (c:Chunk) RETURN count(c) AS n").single()
         return 0 if record is None else int(record["n"])
 
-    def _write(self, query: str, rows: Sequence[dict[str, Any]]) -> None:
+    def delete_article(self, arxiv_id: str) -> bool:
+        def delete(tx: neo4j.ManagedTransaction) -> bool:
+            found = tx.run(AUTHORS_OF_ARTICLE, id=arxiv_id).single()
+            if found is None or not found["n"]:
+                return False
+            tx.run(DELETE_ARTICLE, id=arxiv_id).consume()
+            tx.run(DELETE_ORPHAN_AUTHORS, keys=found["keys"]).consume()
+            return True
+
+        with self._driver.session() as session:
+            return session.execute_write(delete)
+
+    def _write(self, rows: Sequence[dict[str, Any]], *queries: str) -> None:
+        """Run `queries` in order over `rows`, one transaction per batch of rows."""
+
         def run_chunk(tx: neo4j.ManagedTransaction, chunk: list[dict[str, Any]]) -> None:
-            tx.run(query, rows=chunk).consume()
+            for query in queries:
+                tx.run(query, rows=chunk).consume()
 
         with self._driver.session() as session:
             for chunk in _chunks(rows, WRITE_BATCH):

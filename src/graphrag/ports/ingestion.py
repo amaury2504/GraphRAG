@@ -41,11 +41,25 @@ class GraphStore(Protocol):
         ...
 
     def upsert_works(self, records: Sequence[WorkRecord]) -> None:
-        """Attach OpenAlex ids, authors and AUTHORED_BY relations. Idempotent."""
+        """Attach OpenAlex ids and make AUTHORED_BY match each record exactly. Idempotent.
+
+        Relations to authors a record no longer lists are removed, then authors left with
+        no article are deleted, in the same transaction.
+        """
         ...
 
     def upsert_citations(self, records: Sequence[ReferenceRecord]) -> None:
-        """Create CITES relations between corpus articles only. Idempotent."""
+        """Make the outgoing CITES of each record match it, corpus articles only. Idempotent.
+
+        Citations a record no longer lists are removed; an empty list removes them all.
+        """
+        ...
+
+    def delete_article(self, arxiv_id: str) -> bool:
+        """Remove an article with its chunks, its CITES (both ways) and its orphan authors.
+
+        Returns False if the article was not stored.
+        """
         ...
 
     def article_ids(self) -> list[str]: ...
@@ -62,4 +76,8 @@ class CitationLedger(Protocol):
 
     def mark(self, arxiv_ids: Sequence[str]) -> None:
         """Record ids as done; call only after their citations are stored."""
+        ...
+
+    def forget(self, arxiv_ids: Sequence[str]) -> None:
+        """Make ids to be looked up again, e.g. because their article was modified."""
         ...

@@ -275,3 +275,104 @@ def test_interrupted_run_then_rerun_matches_clean_run(store: Neo4jStore) -> None
         ingest(store, FakePapers(fail_after=2))
     final = ingest(store, FakePapers())
     assert delta(before, final) == (3, 2, 3, 1)
+
+
+def _authors_of(article_id: str) -> list[str]:
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        records, _, _ = driver.execute_query(
+            "MATCH (:Article {arxiv_id: $id})-[r:AUTHORED_BY]->(p) "
+            "RETURN p.key AS k ORDER BY r.position",
+            id=article_id,
+        )
+    return [r["k"] for r in records]
+
+
+def _cited_by(article_id: str) -> list[str]:
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        records, _, _ = driver.execute_query(
+            "MATCH (:Article {arxiv_id: $id})-[:CITES]->(t) RETURN t.arxiv_id AS t ORDER BY t",
+            id=article_id,
+        )
+    return [r["t"] for r in records]
+
+
+def _author_exists(key: str) -> bool:
+    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
+        records, _, _ = driver.execute_query(
+            "MATCH (p:Author {key: $key}) RETURN count(p) AS n", key=key
+        )
+    return bool(records[0]["n"])
+
+
+def test_an_author_removed_from_a_work_loses_the_relation_and_orphan_node(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([B])
+    store.upsert_works(WORKS[1:])  # B: ATEST1, ATEST2
+    store.upsert_works([WorkRecord(B.arxiv_id, "WTEST2", (Author("ATEST1", "Ann"),))])
+    assert _authors_of(B.arxiv_id) == ["ATEST1"]
+    assert not _author_exists("ATEST2")
+
+
+def test_a_removed_author_still_shared_with_another_article_is_kept(store: Neo4jStore) -> None:
+    store.upsert_articles([A, B])
+    store.upsert_works(WORKS)  # A: ATEST1; B: ATEST1, ATEST2
+    store.upsert_works([WorkRecord(B.arxiv_id, "WTEST2", (Author("ATEST2", "Bob"),))])
+    assert _authors_of(A.arxiv_id) == ["ATEST1"]
+    assert _authors_of(B.arxiv_id) == ["ATEST2"]
+
+
+def test_a_work_with_no_authors_removes_all_of_them(store: Neo4jStore) -> None:
+    store.upsert_articles([A])
+    store.upsert_works(WORKS[:1])
+    store.upsert_works([WorkRecord(A.arxiv_id, "WTEST1", ())])
+    assert _authors_of(A.arxiv_id) == []
+    assert not _author_exists("ATEST1")
+
+
+def test_reordered_authors_get_their_new_position(store: Neo4jStore) -> None:
+    store.upsert_articles([B])
+    store.upsert_works(WORKS[1:])
+    store.upsert_works(
+        [WorkRecord(B.arxiv_id, "WTEST2", (Author("ATEST2", "Bob"), Author("ATEST1", "Ann")))]
+    )
+    assert _authors_of(B.arxiv_id) == ["ATEST2", "ATEST1"]
+
+
+def test_a_citation_no_longer_listed_is_removed(store: Neo4jStore) -> None:
+    store.upsert_articles([A, B, C])
+    store.upsert_citations([ReferenceRecord(A.arxiv_id, (B.arxiv_id, C.arxiv_id))])
+    store.upsert_citations([ReferenceRecord(A.arxiv_id, (C.arxiv_id,))])
+    assert _cited_by(A.arxiv_id) == [C.arxiv_id]
+
+
+def test_an_empty_reference_list_removes_every_citation_of_that_article(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([A, B, C])
+    store.upsert_citations(
+        [ReferenceRecord(A.arxiv_id, (B.arxiv_id,)), ReferenceRecord(B.arxiv_id, (C.arxiv_id,))]
+    )
+    store.upsert_citations([ReferenceRecord(A.arxiv_id, ())])
+    assert _cited_by(A.arxiv_id) == []
+    assert _cited_by(B.arxiv_id) == [C.arxiv_id]  # another article's citations are untouched
+
+
+def test_deleting_an_article_removes_its_chunks_relations_and_orphan_authors(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([A, B, C])
+    store.upsert_works(WORKS)  # A: ATEST1; B: ATEST1, ATEST2
+    store.upsert_citations(
+        [ReferenceRecord(A.arxiv_id, (B.arxiv_id,)), ReferenceRecord(C.arxiv_id, (B.arxiv_id,))]
+    )
+    assert store.delete_article(B.arxiv_id) is True
+    assert B.arxiv_id not in store.article_ids()
+    assert _cited_by(A.arxiv_id) == []  # incoming CITES gone
+    assert _cited_by(C.arxiv_id) == []
+    assert _author_exists("ATEST1")  # still written A
+    assert not _author_exists("ATEST2")
+
+
+def test_deleting_an_unknown_article_returns_false(store: Neo4jStore) -> None:
+    assert store.delete_article("9999.99999") is False

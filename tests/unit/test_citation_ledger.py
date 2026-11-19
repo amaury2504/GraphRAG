@@ -30,3 +30,25 @@ def test_marking_nothing_creates_no_file(tmp_path: Path) -> None:
     path = tmp_path / "checked.txt"
     FileCitationLedger(path).mark([])
     assert not path.exists()
+
+
+def test_forget_removes_only_the_given_ids(tmp_path: Path) -> None:
+    path = tmp_path / "checked.txt"
+    ledger = FileCitationLedger(path)
+    ledger.mark(["2501.00001", "2501.00002", "2501.00003"])
+    ledger.forget(["2501.00002", "2509.99999"])
+    assert ledger.checked() == {"2501.00001", "2501.00003"}
+
+
+def test_forget_on_a_missing_file_does_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "absent.txt"
+    FileCitationLedger(path).forget(["2501.00001"])
+    assert not path.exists()
+
+
+def test_forget_nothing_leaves_the_file_untouched(tmp_path: Path) -> None:
+    path = tmp_path / "checked.txt"
+    ledger = FileCitationLedger(path)
+    ledger.mark(["2501.00001"])
+    ledger.forget([])
+    assert ledger.checked() == {"2501.00001"}

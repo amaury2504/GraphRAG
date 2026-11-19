@@ -361,3 +361,14 @@ def test_the_probe_counts_chunks_written_without_a_hash(store: Neo4jStore) -> No
     before = probe.unindexed_articles()
     store.upsert_chunks([indexed(1, 0, "some text", 0)])
     assert probe.unindexed_articles() == before  # chunks alone do not make it current
+
+
+def test_deleting_an_article_deletes_its_chunks(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1), art(2)])
+    store.upsert_chunks(
+        [indexed(1, 0, "gone", 0), indexed(2, 0, "kept", 1)],
+        {"9999.00001": "h1", "9999.00002": "h1"},
+    )
+    assert store.delete_article("9999.00001") is True
+    assert keys_of("9999.00001") == []
+    assert keys_of("9999.00002") == ["9999.00002#0"]

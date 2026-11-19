@@ -23,3 +23,11 @@ class FileCitationLedger:
         with self._path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.writelines(f"{i}\n" for i in arxiv_ids)
             handle.flush()
+
+    def forget(self, arxiv_ids: Sequence[str]) -> None:
+        """Drop ids so their references are looked up again (their article changed)."""
+        if not arxiv_ids or not self._path.exists():
+            return
+        kept = self.checked() - set(arxiv_ids)
+        with self._path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.writelines(f"{i}\n" for i in sorted(kept))
