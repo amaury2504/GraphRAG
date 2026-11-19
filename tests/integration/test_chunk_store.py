@@ -414,7 +414,10 @@ def test_a_new_version_shares_the_unchanged_chunks_and_drops_the_replaced_ones(
     assert second.id == first.id + 1
     assert manifest(first.id) == sorted([old.key, kept.key])
     assert manifest(second.id) == sorted([new.key, kept.key])
-    assert readable(store, 0) == ["new"]  # the replaced chunk is stored but not readable
+    along_replaced = readable(store, 0)  # the nearest chunks, whatever the rest of the database
+    assert "new" in along_replaced
+    assert "old" not in along_replaced  # the replaced chunk is stored but not readable
+    assert "kept" in readable(store, 1)
     assert len(keys_of("9999.00002")) == 1  # the shared chunk exists once
 
 
