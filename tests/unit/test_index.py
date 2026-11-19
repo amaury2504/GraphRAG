@@ -1,11 +1,12 @@
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 
 import pytest
 
-from graphrag.cli.index import index_articles, run_indexing
+from graphrag.cli.index import _parse_args, index_articles, run_indexing, run_rollback
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
+from graphrag.domain.versioning import VersionInfo
 
 
 def article(n: int, abstract: str = "One sentence.", title: str = "Title") -> Article:
@@ -27,10 +28,15 @@ class FakeEmbedder:
 
 
 class FakeChunkStore:
+    """Chunks are immutable and never deleted; a version is a manifest of the latest chunk keys."""
+
     def __init__(self, articles: list[Article], fail_on_write: int | None = None) -> None:
         self.articles = articles
         self.chunks: dict[str, IndexedChunk] = {}
         self.hashes: dict[str, str] = {}
+        self.article_keys: dict[str, set[str]] = {}
+        self.manifests: list[frozenset[str]] = []
+        self.current: int | None = None  # index into `manifests`
         self.schema_dimensions: list[int] = []
         self.writes: list[list[str]] = []
         self.fail_on_write = fail_on_write
@@ -46,20 +52,32 @@ class FakeChunkStore:
 
     def upsert_chunks(
         self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
-    ) -> int:
+    ) -> None:
         if self.fail_on_write is not None and len(self.writes) == self.fail_on_write:
             raise RuntimeError("neo4j went away")
         owners = article_hashes or {}
         self.writes.append(sorted(owners or {c.chunk.arxiv_id for c in chunks}))
-        keep = {c.key for c in chunks}
-        stale = [
-            key for key, c in self.chunks.items() if c.chunk.arxiv_id in owners and key not in keep
-        ]
-        for key in stale:
-            del self.chunks[key]
-        self.chunks.update({c.key: c for c in chunks})
+        self.chunks.update({c.key: c for c in chunks if c.key not in self.chunks})  # immutable
+        for article_id in owners:
+            self.article_keys[article_id] = {
+                c.key for c in chunks if c.chunk.arxiv_id == article_id
+            }
         self.hashes.update(owners)
-        return len(stale)
+
+    def publish_version(self) -> VersionInfo:
+        self.manifests.append(frozenset().union(*self.article_keys.values()))
+        self.current = len(self.manifests) - 1
+        return self._info(self.current)
+
+    def current_version(self) -> VersionInfo | None:
+        return None if self.current is None else self._info(self.current)
+
+    def rollback(self) -> VersionInfo:
+        raise NotImplementedError  # the indexing pipeline never rolls back
+
+    def _info(self, index: int) -> VersionInfo:
+        created = datetime(2026, 11, 18, tzinfo=UTC)
+        return VersionInfo(index + 1, created, len(self.manifests[index]))
 
     def chunk_count(self) -> int:
         return len(self.chunks)
@@ -83,7 +101,7 @@ def test_index_articles_embeds_title_plus_chunk_and_keeps_chunk_text() -> None:
     assert indexed.search_text == "Title 1. Dense retrieval works."
     assert embedder.calls == [["Title 1. Dense retrieval works."]]
     assert indexed.embedding == (float(len("Title 1. Dense retrieval works.")), 1.0)
-    assert indexed.key == "2401.00001#0"
+    assert indexed.key.startswith("2401.00001#0#")
 
 
 def test_every_chunk_of_a_long_abstract_gets_its_own_title() -> None:
@@ -111,7 +129,7 @@ def test_run_creates_schema_with_embedder_dimensions_and_indexes_all() -> None:
         ["2401.00005"],
     ]
     assert (report.articles, report.chunks, report.total_chunks) == (5, 5, 5)
-    assert report.removed == 0
+    assert report.version == 1
 
 
 def test_rerun_indexes_nothing_more() -> None:
@@ -151,6 +169,7 @@ def test_progress_is_logged_per_batch() -> None:
         "chunks: 3 articles to index",
         "chunks: 2/3 articles indexed, 2 chunks",
         "chunks: 3/3 articles indexed, 3 chunks",
+        "chunks: version 1 published (3 chunks)",
     ]
 
 
@@ -175,26 +194,29 @@ def test_an_article_whose_text_changed_is_indexed_again() -> None:
     report = run_indexing(store, embedder, log=quiet)
     assert report.articles == 1
     assert embedder.calls == [["Title 1. A new abstract."]]
-    assert store.chunks["2401.00001#0"].chunk.text == "A new abstract."
+    texts = {c.chunk.text for c in store.chunks.values()}
+    assert texts == {"One sentence.", "A new abstract."}  # the old chunk is kept, not rewritten
 
 
-def test_chunks_beyond_the_new_end_are_removed() -> None:
+def test_a_shorter_article_drops_its_extra_chunks_from_the_new_version_only() -> None:
     store = FakeChunkStore([article(1, long_abstract(8))])
     first = run_indexing(store, FakeEmbedder(), log=quiet)
     assert first.chunks > 1
     store.articles[0] = article(1, "Short now.")
     report = run_indexing(store, FakeEmbedder(), log=quiet)
-    assert report.removed == first.chunks - 1
-    assert list(store.chunks) == ["2401.00001#0"]
-    assert report.total_chunks == 1
+    assert report.total_chunks == first.chunks + 1  # nothing is deleted: that is the GC's job
+    assert len(store.manifests[0]) == first.chunks
+    assert len(store.manifests[1]) == 1
+    assert store.manifests[0].isdisjoint(store.manifests[1])
 
 
-def test_an_article_left_with_no_chunk_loses_all_its_old_ones() -> None:
-    store = FakeChunkStore([article(1)])
+def test_an_article_left_with_no_chunk_is_absent_from_the_new_version() -> None:
+    store = FakeChunkStore([article(1), article(2)])
     run_indexing(store, FakeEmbedder(), log=quiet)
     store.articles[0] = article(1, abstract="   ")
     report = run_indexing(store, FakeEmbedder(), log=quiet)
-    assert (report.chunks, report.removed, report.total_chunks) == (0, 1, 0)
+    assert (report.chunks, report.total_chunks) == (0, 2)
+    assert len(store.manifests[1]) == 1
     assert store.hashes["2401.00001"] == article_hash(store.articles[0])
 
 
@@ -205,7 +227,8 @@ def test_the_hash_is_recorded_with_the_chunks_and_the_rerun_is_idempotent() -> N
     snapshot = dict(store.chunks)
     writes = len(store.writes)
     report = run_indexing(store, FakeEmbedder(), log=quiet)
-    assert (report.articles, report.removed) == (0, 0)
+    assert (report.articles, report.version) == (0, None)
+    assert len(store.manifests) == 1  # no change, no new version
     assert store.chunks == snapshot
     assert len(store.writes) == writes
 
@@ -247,10 +270,73 @@ def test_an_interruption_after_a_change_leaves_the_old_chunks_and_resumes() -> N
     assert run_indexing(store, FakeEmbedder(), log=quiet).articles == 1
 
 
-def test_the_log_counts_the_removed_chunks() -> None:
-    store = FakeChunkStore([article(1, long_abstract(8))])
-    first = run_indexing(store, FakeEmbedder(), log=quiet)
-    store.articles[0] = article(1, "Short now.")
+def test_a_run_publishes_one_version_after_all_its_batches() -> None:
+    store = FakeChunkStore([article(n) for n in range(1, 6)])
+    report = run_indexing(store, FakeEmbedder(), batch_size=2, log=quiet)
+    assert len(store.writes) == 3
+    assert len(store.manifests) == 1  # one snapshot, not one per batch
+    assert len(store.manifests[0]) == 5
+    assert report.version == 1
+
+
+def test_a_changed_article_gives_a_new_version_that_shares_the_unchanged_chunks() -> None:
+    store = FakeChunkStore([article(1), article(2)])
+    run_indexing(store, FakeEmbedder(), log=quiet)
+    store.articles[0] = article(1, "A new abstract.")
+    report = run_indexing(store, FakeEmbedder(), log=quiet)
+    first, second = store.manifests
+    assert report.version == 2
+    assert len(first & second) == 1  # article 2's chunk, shared and not copied
+    assert len(first | second) == 3
+    assert store.current_version() == VersionInfo(2, datetime(2026, 11, 18, tzinfo=UTC), 2)
+
+
+def test_an_interrupted_run_publishes_nothing_and_the_resumed_run_publishes_everything() -> None:
+    store = FakeChunkStore([article(n) for n in range(1, 6)], fail_on_write=1)
+    with pytest.raises(RuntimeError, match="went away"):
+        run_indexing(store, FakeEmbedder(), batch_size=2, log=quiet)
+    assert store.current_version() is None  # the first batch is written but not readable
+    store.fail_on_write = None
+    report = run_indexing(store, FakeEmbedder(), batch_size=2, log=quiet)
+    assert report.version == 1
+    assert len(store.manifests[0]) == 5
+
+
+def test_a_database_without_any_version_gets_its_first_one_even_with_nothing_to_index() -> None:
+    store = FakeChunkStore([article(1)])
+    run_indexing(store, FakeEmbedder(), log=quiet)
+    store.manifests.clear()
+    store.current = None  # chunks indexed before versions existed
+    report = run_indexing(store, FakeEmbedder(), log=quiet)
+    assert (report.articles, report.version) == (0, 1)
+    assert len(store.manifests[0]) == 1
+
+
+def test_the_log_announces_the_published_version() -> None:
+    lines: list[str] = []
+    run_indexing(FakeChunkStore([article(1)]), FakeEmbedder(), log=lines.append)
+    assert lines[-1] == "chunks: version 1 published (1 chunks)"
+
+
+def test_the_rollback_option_is_off_by_default() -> None:
+    assert _parse_args([]).rollback is False
+    assert _parse_args(["--rollback"]).rollback is True
+
+
+def test_a_rollback_is_delegated_to_the_store_and_logged() -> None:
+    class RollingBack(FakeChunkStore):
+        def rollback(self) -> VersionInfo:
+            return VersionInfo(1, datetime(2026, 11, 18, tzinfo=UTC), 7)
+
+    lines: list[str] = []
+    version = run_rollback(RollingBack([]), log=lines.append)
+    assert version.id == 1
+    assert lines == ["chunks: rolled back to version 1 (7 chunks)"]
+
+
+def test_nothing_is_logged_about_a_version_when_none_is_published() -> None:
+    store = FakeChunkStore([article(1)])
+    run_indexing(store, FakeEmbedder(), log=quiet)
     lines: list[str] = []
     run_indexing(store, FakeEmbedder(), log=lines.append)
-    assert lines[-1] == f"chunks: 1/1 articles indexed, 1 chunks, {first.chunks - 1} removed"
+    assert lines == ["chunks: 0 articles to index"]

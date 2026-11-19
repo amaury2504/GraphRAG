@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from datetime import date
 
+from graphrag.domain.versioning import chunk_key
+
 
 @dataclass(frozen=True, slots=True)
 class Article:
@@ -53,7 +55,7 @@ class IndexedChunk:
 
     @property
     def key(self) -> str:
-        return f"{self.chunk.arxiv_id}#{self.chunk.position}"
+        return chunk_key(self.chunk.arxiv_id, self.chunk.position, self.search_text)
 
 
 @dataclass(frozen=True, slots=True)
