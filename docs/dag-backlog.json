@@ -34,7 +34,8 @@
       "contenu": "Mark and sweep des chunks non référencés par une version conservée, durée de rétention, compactage ou reconstruction de l'index vectoriel",
       "type": "code",
       "source": "docs/backlog.md",
-      "etat": "a-faire",
+      "etat": "fait",
+      "pr": 9,
       "branche": "agent/t4",
       "worktree": "../GraphRAG-wt/t4"
     },
@@ -53,6 +54,7 @@
       "type": "code",
       "source": "docs/backlog.md",
       "etat": "fait",
+      "pr": 7,
       "branche": "agent/t6",
       "worktree": "../GraphRAG-wt/t6"
     },

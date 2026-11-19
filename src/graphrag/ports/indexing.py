@@ -2,7 +2,7 @@ from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from graphrag.domain.models import ArticleIndexState, IndexedChunk, IndexInfo
-from graphrag.domain.versioning import VersionInfo
+from graphrag.domain.versioning import GcReport, VersionInfo
 
 
 class ChunkStore(Protocol):
@@ -59,6 +59,19 @@ class ChunkStore(Protocol):
         Raises LookupError if there is no current version or no earlier one. Articles whose
         chunks differ from that version are marked as not indexed, so the next indexing run
         rebuilds them from their source text instead of silently bringing them back.
+        """
+        ...
+
+    def collect_garbage(self, *, keep: int, min_age_days: int, apply: bool) -> GcReport:
+        """Mark and sweep: drop old versions, then the chunks that nothing references any more.
+
+        Roots are the manifests of the versions kept (the `keep` newest of the current chain, and
+        any other version younger than `min_age_days`) and the chunks every article owns for the
+        next version, so chunks written by a run that has not published yet are safe. Without
+        `apply` nothing is deleted and the report says what would be.
+
+        Raises LookupError if no version was ever published (nothing says what is live) and
+        ValueError if `keep` or `min_age_days` is out of range. Idempotent and resumable.
         """
         ...
 

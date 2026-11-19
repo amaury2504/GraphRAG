@@ -16,12 +16,13 @@ from graphrag.cli.ingest import log_line
 from graphrag.domain.chunking import chunk_abstract, search_text
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
-from graphrag.domain.versioning import VersionInfo, VersionNotReadyError
+from graphrag.domain.versioning import GcReport, VersionInfo, VersionNotReadyError
 from graphrag.ports.embedding import Embedder
 from graphrag.ports.indexing import ChunkStore
 from graphrag.settings import Settings
 
 ARTICLES_PER_BATCH = 64
+DEFAULT_KEPT_VERSIONS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,13 +83,41 @@ def run_indexing(
 
 
 def run_rollback(store: ChunkStore, *, log: Callable[[str], None] = log_line) -> VersionInfo:
-    """Make the previous version current again (the chunks of the abandoned one stay stored)."""
+    """Make the previous version current again (the abandoned one's chunks stay until a gc)."""
     version = store.rollback()
     log(
         f"chunks: rolled back to version {version.id} "
         f"({version.chunk_count} chunks, {version.status})"
     )
     return version
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def run_gc(
+    store: ChunkStore,
+    *,
+    keep: int,
+    min_age_days: int,
+    apply: bool,
+    log: Callable[[str], None] = log_line,
+) -> GcReport:
+    """Drop old versions and the chunks no kept version references (a dry run unless `apply`)."""
+    report = store.collect_garbage(keep=keep, min_age_days=min_age_days, apply=apply)
+    kept = ", ".join(str(v) for v in report.kept_versions)
+    log(f"gc: versions kept {kept}" if apply else f"gc: dry run, versions kept {kept}")
+    if not report.dropped_versions and not report.unreferenced_chunks:
+        log("gc: nothing to remove")
+        return report
+    dropped = ", ".join(str(v) for v in report.dropped_versions)
+    what = (
+        f"{_plural(len(report.dropped_versions), 'version')} ({dropped}) "
+        f"and {_plural(report.unreferenced_chunks, 'chunk')}"
+    )
+    log(f"gc: dropped {what}" if apply else f"gc: would drop {what}, rerun with --apply to delete")
+    return report
 
 
 def stale_articles(states: Sequence[ArticleIndexState], limit: int | None = None) -> list[Article]:
@@ -101,12 +130,32 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Embed article chunks into Neo4j.")
     parser.add_argument("--limit", type=int, default=None, help="index at most N articles")
     parser.add_argument("--batch-size", type=int, default=ARTICLES_PER_BATCH)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--rollback",
         action="store_true",
         help="make the previous index version current again, then stop (no indexing)",
     )
-    return parser.parse_args(argv)
+    mode.add_argument(
+        "--gc",
+        action="store_true",
+        help="garbage-collect old versions and unreferenced chunks (dry run unless --apply)",
+    )
+    parser.add_argument(
+        "--keep", type=int, default=DEFAULT_KEPT_VERSIONS, help="versions to keep (--gc, min 2)"
+    )
+    parser.add_argument(
+        "--min-age-days",
+        type=int,
+        default=0,
+        help="also keep any version younger than this many days (--gc)",
+    )
+    parser.add_argument("--apply", action="store_true", help="really delete (--gc)")
+    args = parser.parse_args(argv)
+    gc_only = (args.apply, args.keep != DEFAULT_KEPT_VERSIONS, args.min_age_days != 0)
+    if any(gc_only) and not args.gc:
+        parser.error("--apply, --keep and --min-age-days only go with --gc")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -120,6 +169,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_rollback(store)
             except LookupError as error:
                 log_line(f"chunks: {error}")
+                return 2
+        return 0
+    if args.gc:
+        with Neo4jStore(uri, user, password) as store:
+            try:
+                run_gc(store, keep=args.keep, min_age_days=args.min_age_days, apply=args.apply)
+            except (LookupError, ValueError) as error:
+                log_line(f"gc: {error}")
                 return 2
         return 0
     log_line("loading the embedding model")

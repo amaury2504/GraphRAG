@@ -1,5 +1,6 @@
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from itertools import islice
 from typing import Any
 
@@ -18,10 +19,12 @@ from graphrag.domain.models import (
     WorkRecord,
 )
 from graphrag.domain.versioning import (
+    GcReport,
     VersionInfo,
     VersionNotReadyError,
     VersionStatus,
     ensure_indexed,
+    plan_retention,
 )
 
 WRITE_BATCH = 500
@@ -290,6 +293,45 @@ OPTIONAL MATCH (:Version {id: $id})-[:CONTAINS]->(c:Chunk)-[:PART_OF]->(a)
 WITH a, [key IN collect(c.key) WHERE key IS NOT NULL] AS keys
 SET a.indexed_keys = keys
 """
+
+# Garbage collection. The scopes are extra conditions ("AND ...") that tests use to restrict
+# the collection to their own data; they are empty in production.
+GC_CHUNK_SCOPE = ""
+GC_VERSION_SCOPE = ""
+GC_BATCH = 1000  # chunks deleted per transaction
+
+VERSION_FIELDS = (
+    "v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count, "
+    "coalesce(v.status, 'indexed') AS status"
+)
+
+# The current version, then its predecessors back to the oldest one still linked.
+CHAIN_VERSIONS = f"""
+MATCH (:Current {{name: $name}})-[:POINTS_TO]->(head:Version)
+MATCH path = (head)-[:PREVIOUS*0..]->(v:Version)
+RETURN {VERSION_FIELDS}
+ORDER BY length(path)
+"""
+
+DELETE_VERSIONS = "MATCH (v:Version) WHERE v.id IN $ids DETACH DELETE v"
+
+
+def _all_versions() -> str:
+    return f"MATCH (v:Version) WHERE true {GC_VERSION_SCOPE} RETURN {VERSION_FIELDS}"
+
+
+def _unreferenced_chunks() -> str:
+    """Chunks in no kept version and not in the `indexed_keys` of their article.
+
+    The second condition keeps what an indexing run wrote but has not published yet.
+    """
+    return f"""
+MATCH (c:Chunk)
+WHERE true {GC_CHUNK_SCOPE}
+  AND NOT EXISTS {{ MATCH (v:Version)-[:CONTAINS]->(c) WHERE v.id IN $kept }}
+  AND NOT EXISTS {{ MATCH (c)-[:PART_OF]->(a:Article) WHERE c.key IN a.indexed_keys }}
+"""
+
 
 # Searches ask the index for more candidates than needed, then keep those of the current
 # version. Without any current version (an index built before versions existed) nothing is
@@ -664,6 +706,41 @@ class Neo4jStore:
 
         with self._driver.session() as session:
             return session.execute_write(write)
+
+    def collect_garbage(self, *, keep: int, min_age_days: int, apply: bool) -> GcReport:
+        with self._driver.session() as session:
+            chain = [_version(r) for r in session.run(CHAIN_VERSIONS, name=CURRENT_NAME)]
+            if not chain:
+                raise LookupError("no version published yet: nothing says which chunks are live")
+            on_chain = {v.id for v in chain}
+            abandoned = [
+                v
+                for v in (_version(r) for r in session.run(_all_versions()))
+                if v.id not in on_chain
+            ]
+            plan = plan_retention(
+                chain, abandoned, keep=keep, min_age_days=min_age_days, now=datetime.now(UTC)
+            )
+            kept = list(plan.kept)
+            if not apply:
+                count = session.run(_unreferenced_chunks() + "RETURN count(c) AS n", kept=kept)
+                return GcReport(plan.kept, plan.dropped, int(count.single(strict=True)["n"]), False)
+            session.run(DELETE_VERSIONS, ids=list(plan.dropped)).consume()
+            sweep = (
+                _unreferenced_chunks() + "WITH c LIMIT $batch DETACH DELETE c RETURN count(*) AS n"
+            )
+            deleted = 0
+            while batch := self._sweep_batch(session, sweep, kept):
+                deleted += batch
+            return GcReport(plan.kept, plan.dropped, deleted, True)
+
+    @staticmethod
+    def _sweep_batch(session: neo4j.Session, sweep: str, kept: list[int]) -> int:
+        def write(tx: neo4j.ManagedTransaction) -> int:
+            record = tx.run(sweep, batch=GC_BATCH, kept=kept).single(strict=True)
+            return int(record["n"])
+
+        return session.execute_write(write)
 
     def vector_search(self, vector: Sequence[float], k: int) -> list[SearchHit]:
         with self._driver.session() as session:

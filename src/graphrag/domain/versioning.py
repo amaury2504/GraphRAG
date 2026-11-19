@@ -6,11 +6,13 @@ contains it. A version is a snapshot (a manifest of chunk keys) of the whole cor
 """
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 KEY_DIGEST_LENGTH = 16  # hex characters of the SHA-256 kept in the key (64 bits)
+MIN_KEPT_VERSIONS = 2  # the current one and the one a rollback goes back to
 
 
 def chunk_key(arxiv_id: str, position: int, search_text: str) -> str:
@@ -61,3 +63,47 @@ def ensure_indexed(version_id: int, *, chunks: int, with_vector: int, with_text:
     ]
     if problems:
         raise VersionNotReadyError(version_id, "; ".join(problems))
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionPlan:
+    """Which versions the garbage collector keeps and which it drops, as version ids."""
+
+    kept: tuple[int, ...]
+    dropped: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GcReport:
+    """What a garbage collection removed (or would remove, when `applied` is False)."""
+
+    kept_versions: tuple[int, ...]
+    dropped_versions: tuple[int, ...]
+    unreferenced_chunks: int
+    applied: bool
+
+
+def plan_retention(
+    chain: Sequence[VersionInfo],
+    abandoned: Sequence[VersionInfo],
+    *,
+    keep: int,
+    min_age_days: int,
+    now: datetime,
+) -> RetentionPlan:
+    """Keep the `keep` newest versions of the chain, plus any other version younger than the limit.
+
+    `chain` runs from the current version back through its predecessors, newest first.
+    `abandoned` holds the versions off that chain (those a rollback left behind). A version
+    outside the window is dropped once it is at least `min_age_days` old.
+    """
+    if keep < MIN_KEPT_VERSIONS:
+        raise ValueError(f"keep at least {MIN_KEPT_VERSIONS} versions, a rollback needs one")
+    if min_age_days < 0:
+        raise ValueError("the minimum age cannot be negative")
+    limit = timedelta(days=min_age_days)
+    kept = [v.id for v in chain[:keep]]
+    dropped: list[int] = []
+    for candidate in (*chain[keep:], *abandoned):
+        (kept if now - candidate.created_at < limit else dropped).append(candidate.id)
+    return RetentionPlan(tuple(kept), tuple(dropped))

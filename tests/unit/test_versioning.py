@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -9,6 +9,7 @@ from graphrag.domain.versioning import (
     VersionStatus,
     chunk_key,
     ensure_indexed,
+    plan_retention,
 )
 
 
@@ -80,3 +81,53 @@ def test_a_version_with_chunks_missing_from_an_index_is_refused(
     with pytest.raises(VersionNotReadyError) as raised:
         ensure_indexed(4, chunks=5, with_vector=with_vector, with_text=with_text)
     assert str(raised.value) == f"version 4 is not ready to be read: {message}"
+
+
+NOW = datetime(2026, 11, 19, tzinfo=UTC)
+
+
+def version(version_id: int, age_days: int) -> VersionInfo:
+    return VersionInfo(version_id, NOW - timedelta(days=age_days), 10)
+
+
+CHAIN = [version(5, 1), version(4, 10), version(3, 20), version(2, 30), version(1, 40)]
+
+
+def test_the_newest_versions_of_the_chain_are_kept_and_the_older_ones_dropped() -> None:
+    plan = plan_retention(CHAIN, [], keep=3, min_age_days=0, now=NOW)
+    assert plan.kept == (5, 4, 3)
+    assert plan.dropped == (2, 1)
+
+
+def test_a_chain_shorter_than_the_window_drops_nothing() -> None:
+    plan = plan_retention(CHAIN[:2], [], keep=3, min_age_days=0, now=NOW)
+    assert plan.kept == (5, 4)
+    assert plan.dropped == ()
+
+
+def test_keeping_fewer_than_two_versions_is_refused_because_a_rollback_needs_the_previous() -> None:
+    with pytest.raises(ValueError, match="at least 2"):
+        plan_retention(CHAIN, [], keep=1, min_age_days=0, now=NOW)
+
+
+def test_a_version_outside_the_window_but_younger_than_the_minimum_age_is_kept() -> None:
+    plan = plan_retention(CHAIN, [], keep=2, min_age_days=25, now=NOW)
+    assert plan.kept == (5, 4, 3)  # version 3 is 20 days old, version 2 is 30
+    assert plan.dropped == (2, 1)
+
+
+def test_versions_abandoned_by_a_rollback_are_dropped_unless_recent() -> None:
+    abandoned = [version(7, 2), version(6, 50)]
+    plan = plan_retention(CHAIN[:3], abandoned, keep=2, min_age_days=5, now=NOW)
+    assert plan.kept == (5, 4, 7)
+    assert plan.dropped == (3, 6)
+
+
+def test_a_negative_minimum_age_is_refused() -> None:
+    with pytest.raises(ValueError, match="minimum age"):
+        plan_retention(CHAIN, [], keep=3, min_age_days=-1, now=NOW)
+
+
+def test_a_version_exactly_as_old_as_the_minimum_age_is_dropped() -> None:
+    plan = plan_retention(CHAIN[:3], [], keep=2, min_age_days=20, now=NOW)
+    assert plan.dropped == (3,)
