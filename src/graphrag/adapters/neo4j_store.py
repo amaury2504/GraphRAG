@@ -16,6 +16,7 @@ from graphrag.domain.models import (
     SearchHit,
     WorkRecord,
 )
+from graphrag.domain.versioning import VersionInfo
 
 WRITE_BATCH = 500
 
@@ -115,50 +116,124 @@ MATCH (a:Article)
 RETURN a, a.indexed_hash AS indexed_hash ORDER BY a.arxiv_id
 """
 
+# A chunk is immutable: if its key exists (same article, position and text) nothing changes.
 UPSERT_CHUNKS = """
 UNWIND $rows AS row
 MATCH (a:Article {arxiv_id: row.arxiv_id})
 MERGE (c:Chunk {key: row.key})
-SET c.arxiv_id = row.arxiv_id,
-    c.position = row.position,
-    c.text = row.text,
-    c.search_text = row.search_text,
-    c.embedding = row.embedding
+ON CREATE SET c.arxiv_id = row.arxiv_id,
+              c.position = row.position,
+              c.text = row.text,
+              c.search_text = row.search_text,
+              c.embedding = row.embedding
+WITH c, a
 MERGE (c)-[:PART_OF]->(a)
 """
 
-# `articles` rows: {arxiv_id, hash, keys}, with `keys` the keys of the chunks to keep.
-DELETE_ORPHAN_CHUNKS = """
-UNWIND $articles AS art
-MATCH (:Article {arxiv_id: art.arxiv_id})<-[:PART_OF]-(c:Chunk)
-WHERE NOT c.key IN art.keys
-DETACH DELETE c
-RETURN count(c) AS deleted
-"""
-
+# `articles` rows: {arxiv_id, hash, keys}, with `keys` the keys of the chunks the article owns.
+# `indexed_keys` is what the article contributes to the next version.
 MARK_INDEXED = """
 UNWIND $articles AS art
 MATCH (a:Article {arxiv_id: art.arxiv_id})
-SET a.indexed_hash = art.hash
+SET a.indexed_hash = art.hash, a.indexed_keys = art.keys
 """
 
+VERSION_CONSTRAINT = (
+    "CREATE CONSTRAINT version_id IF NOT EXISTS FOR (v:Version) REQUIRE v.id IS UNIQUE"
+)
+CURRENT_CONSTRAINT = (
+    "CREATE CONSTRAINT current_name IF NOT EXISTS FOR (c:Current) REQUIRE c.name IS UNIQUE"
+)
+CURRENT_NAME = "index"
 
-VECTOR_SEARCH = """
-CALL db.index.vector.queryNodes($index, $k, $vector) YIELD node, score
-MATCH (node)-[:PART_OF]->(a:Article)
-RETURN a.arxiv_id AS arxiv_id, a.title AS title, node.position AS position,
-       node.text AS text, a.abstract AS abstract, score
-ORDER BY score DESC
+# Articles indexed before versions existed have no `indexed_keys`: they own all their chunks.
+ADOPT_LEGACY_CHUNKS = """
+MATCH (a:Article) WHERE a.indexed_hash IS NOT NULL AND a.indexed_keys IS NULL
+OPTIONAL MATCH (c:Chunk)-[:PART_OF]->(a)
+WITH a, [key IN collect(c.key) WHERE key IS NOT NULL] AS keys
+SET a.indexed_keys = keys
 """
 
-KEYWORD_SEARCH = """
-CALL db.index.fulltext.queryNodes($index, $lucene) YIELD node, score
+CREATE_VERSION = """
+OPTIONAL MATCH (:Current {name: $name})-[:POINTS_TO]->(previous:Version)
+CALL { MATCH (v:Version) RETURN coalesce(max(v.id), 0) + 1 AS next }
+CREATE (version:Version {id: next, created_at: datetime(), chunk_count: 0})
+FOREACH (_ IN CASE WHEN previous IS NULL THEN [] ELSE [1] END |
+         CREATE (version)-[:PREVIOUS]->(previous))
+RETURN version.id AS id
+"""
+
+FILL_MANIFEST = """
+MATCH (version:Version {id: $id})
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
+UNWIND a.indexed_keys AS key
+MATCH (c:Chunk {key: key})
+MERGE (version)-[:CONTAINS]->(c)
+"""
+
+COUNT_MANIFEST = """
+MATCH (version:Version {id: $id})
+OPTIONAL MATCH (version)-[:CONTAINS]->(c:Chunk)
+WITH version, count(c) AS n
+SET version.chunk_count = n
+RETURN version.id AS id, version.created_at AS created_at, n AS chunk_count
+"""
+
+# Moving the pointer is a delete and a create inside the publishing transaction.
+POINT_TO_VERSION = """
+MERGE (current:Current {name: $name})
+WITH current
+OPTIONAL MATCH (current)-[old:POINTS_TO]->(:Version)
+DELETE old
+WITH DISTINCT current
+MATCH (version:Version {id: $id})
+CREATE (current)-[:POINTS_TO]->(version)
+"""
+
+CURRENT_VERSION = """
+MATCH (:Current {name: $name})-[:POINTS_TO]->(v:Version)
+RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count
+"""
+
+PREVIOUS_VERSION = """
+MATCH (:Current {name: $name})-[:POINTS_TO]->(:Version)-[:PREVIOUS]->(v:Version)
+RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count
+"""
+
+# After a rollback each article contributes to the next version the chunks that the version
+# rolled back to contains (none if it holds none of the article's).
+RESTORE_ARTICLE_KEYS = """
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
+OPTIONAL MATCH (:Version {id: $id})-[:CONTAINS]->(c:Chunk)-[:PART_OF]->(a)
+WITH a, [key IN collect(c.key) WHERE key IS NOT NULL] AS keys
+SET a.indexed_keys = keys
+"""
+
+# Searches ask the index for more candidates than needed, then keep those of the current
+# version. Without any current version (an index built before versions existed) nothing is
+# filtered.
+FILTER_OVERSAMPLE = 5
+
+READABLE_ONLY = """
+OPTIONAL MATCH (:Current {name: $name})-[:POINTS_TO]->(version:Version)
+WITH node, score, version
+WHERE version IS NULL OR EXISTS { (version)-[:CONTAINS]->(node) }
 MATCH (node)-[:PART_OF]->(a:Article)
 RETURN a.arxiv_id AS arxiv_id, a.title AS title, node.position AS position,
        node.text AS text, a.abstract AS abstract, score
 ORDER BY score DESC
 LIMIT $k
 """
+
+VECTOR_SEARCH = (
+    "CALL db.index.vector.queryNodes($index, $candidates, $vector) YIELD node, score"
+    + READABLE_ONLY
+)
+
+KEYWORD_SEARCH = (
+    "CALL db.index.fulltext.queryNodes($index, $lucene, {limit: $candidates}) YIELD node, score"
+    + READABLE_ONLY
+)
 
 # Characters with a meaning in Lucene query syntax; `&` and `|` cover `&&` and `||`.
 _LUCENE_SPECIAL = set('+-&|!(){}[]^"~*?:\\/')
@@ -182,6 +257,14 @@ def _hit(record: Any) -> SearchHit:
         text=record["text"],
         score=float(record["score"]),
         abstract=record["abstract"] or "",
+    )
+
+
+def _version(record: Any) -> VersionInfo:
+    return VersionInfo(
+        id=int(record["id"]),
+        created_at=record["created_at"].to_native(),
+        chunk_count=int(record["chunk_count"]),
     )
 
 
@@ -306,6 +389,8 @@ class Neo4jStore:
         with self._driver.session() as session:
             session.run(CHUNK_KEY_CONSTRAINT).consume()
             session.run(INDEX_INFO_CONSTRAINT).consume()
+            session.run(VERSION_CONSTRAINT).consume()
+            session.run(CURRENT_CONSTRAINT).consume()
             session.run(create_vector_index(dimensions)).consume()
             self._ensure_fulltext_index(session)
             record = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single()
@@ -393,7 +478,7 @@ class Neo4jStore:
 
     def upsert_chunks(
         self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
-    ) -> int:
+    ) -> None:
         rows = [
             {
                 "key": c.key,
@@ -407,7 +492,7 @@ class Neo4jStore:
         ]
         owners = article_hashes or {}
         if not rows and not owners:
-            return 0
+            return
         kept: dict[str, list[str]] = {article_id: [] for article_id in owners}
         for c in chunks:
             kept.setdefault(c.chunk.arxiv_id, []).append(c.key)
@@ -416,22 +501,56 @@ class Neo4jStore:
             for article_id in owners
         ]
 
-        def write(tx: neo4j.ManagedTransaction) -> int:
+        def write(tx: neo4j.ManagedTransaction) -> None:
             if rows:
                 tx.run(UPSERT_CHUNKS, rows=rows).consume()
-            if not articles:
-                return 0
-            record = tx.run(DELETE_ORPHAN_CHUNKS, articles=articles).single()
-            tx.run(MARK_INDEXED, articles=articles).consume()
-            return 0 if record is None else int(record["deleted"])
+            if articles:
+                tx.run(MARK_INDEXED, articles=articles).consume()
 
         with self._driver.session() as session:
-            # one transaction: an article is never half indexed, nor half replaced
+            # one transaction: an article is never half indexed
+            session.execute_write(write)
+
+    def publish_version(self) -> VersionInfo:
+        def write(tx: neo4j.ManagedTransaction) -> VersionInfo:
+            tx.run(ADOPT_LEGACY_CHUNKS).consume()
+            version_id = tx.run(CREATE_VERSION, name=CURRENT_NAME).single(strict=True)["id"]
+            tx.run(FILL_MANIFEST, id=version_id).consume()
+            counted = tx.run(COUNT_MANIFEST, id=version_id).single(strict=True)
+            tx.run(POINT_TO_VERSION, name=CURRENT_NAME, id=version_id).consume()
+            return _version(counted)
+
+        with self._driver.session() as session:
+            # one transaction: the manifest and the pointer change together or not at all
+            return session.execute_write(write)
+
+    def current_version(self) -> VersionInfo | None:
+        with self._driver.session() as session:
+            record = session.run(CURRENT_VERSION, name=CURRENT_NAME).single()
+        return None if record is None else _version(record)
+
+    def rollback(self) -> VersionInfo:
+        def write(tx: neo4j.ManagedTransaction) -> VersionInfo:
+            previous = tx.run(PREVIOUS_VERSION, name=CURRENT_NAME).single()
+            if previous is None:
+                raise LookupError("no earlier version to roll back to")
+            tx.run(POINT_TO_VERSION, name=CURRENT_NAME, id=previous["id"]).consume()
+            tx.run(RESTORE_ARTICLE_KEYS, id=previous["id"]).consume()
+            return _version(previous)
+
+        with self._driver.session() as session:
             return session.execute_write(write)
 
     def vector_search(self, vector: Sequence[float], k: int) -> list[SearchHit]:
         with self._driver.session() as session:
-            result = session.run(VECTOR_SEARCH, index=VECTOR_INDEX, k=k, vector=list(vector))
+            result = session.run(
+                VECTOR_SEARCH,
+                index=VECTOR_INDEX,
+                name=CURRENT_NAME,
+                candidates=k * FILTER_OVERSAMPLE,
+                k=k,
+                vector=list(vector),
+            )
             return [_hit(record) for record in result]
 
     def keyword_search(self, text: str, k: int) -> list[SearchHit]:
@@ -439,7 +558,14 @@ class Neo4jStore:
             return []  # nothing to match, and Lucene rejects an empty query
         query = lucene_query(text)
         with self._driver.session() as session:
-            result = session.run(KEYWORD_SEARCH, index=FULLTEXT_INDEX, lucene=query, k=k)
+            result = session.run(
+                KEYWORD_SEARCH,
+                index=FULLTEXT_INDEX,
+                name=CURRENT_NAME,
+                candidates=k * FILTER_OVERSAMPLE,
+                lucene=query,
+                k=k,
+            )
             return [_hit(record) for record in result]
 
     def chunk_count(self) -> int:

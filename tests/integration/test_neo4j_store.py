@@ -108,7 +108,7 @@ def test_all_articles_returns_complete_articles_in_id_order(store: Neo4jStore) -
     assert ours == [art(1), art(2)]
 
 
-def _stored(query: str, **params: str) -> list[neo4j.Record]:
+def _stored(query: str, **params: str | int) -> list[neo4j.Record]:
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
         records, _, _ = driver.execute_query(query, parameters_=dict(params))
     return list(records)
