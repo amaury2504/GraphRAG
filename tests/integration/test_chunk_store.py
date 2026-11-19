@@ -18,6 +18,7 @@ from graphrag.adapters.neo4j_store import (
 )
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import ArticleIndexState, Chunk, IndexedChunk, IndexInfo
+from graphrag.domain.versioning import VersionNotReadyError, VersionStatus
 from tests.integration.test_neo4j_store import URI, USER, _cleanup, _password, _stored, art
 
 pytestmark = pytest.mark.integration
@@ -421,7 +422,13 @@ def test_a_new_version_shares_the_unchanged_chunks_and_drops_the_replaced_ones(
     assert len(keys_of("9999.00002")) == 1  # the shared chunk exists once
 
 
-def test_the_pointer_moves_in_one_transaction_with_the_manifest(
+def status_of(version_id: int) -> str | None:
+    records = _stored("MATCH (v:Version {id: $id}) RETURN v.status AS status", id=version_id)
+    status = records[0]["status"]
+    return None if status is None else str(status)
+
+
+def test_a_failed_activation_leaves_the_old_version_current_and_the_new_one_indexed(
     store: Neo4jStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store.upsert_articles([art(1)])
@@ -430,10 +437,139 @@ def test_the_pointer_moves_in_one_transaction_with_the_manifest(
     store.upsert_chunks([indexed(1, 0, "next", 5)], {"9999.00001": "h2"})
     monkeypatch.setattr("graphrag.adapters.neo4j_store.POINT_TO_VERSION", "NOT CYPHER")
     with pytest.raises(neo4j.exceptions.Neo4jError):
-        store.publish_version()  # fails after the manifest was built, on the pointer move
+        store.publish_version()  # fails on the pointer move, after the version was verified
     assert store.current_version() == first
     assert readable(store, 5) == ["stable"]
-    assert _max_version_id() == first.id  # the half-built version was rolled back too
+    assert status_of(first.id) == "active"
+    assert status_of(first.id + 1) == "indexed"  # verified, but never readable
+
+
+def test_a_published_version_is_active_and_the_one_it_replaces_is_indexed(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "one", 0)], {"9999.00001": "h1"})
+    first = store.publish_version()
+    assert (first.status, status_of(first.id)) == (VersionStatus.ACTIVE, "active")
+    store.upsert_chunks([indexed(1, 0, "two", 0)], {"9999.00001": "h2"})
+    second = store.publish_version()
+    assert (second.status, status_of(second.id)) == (VersionStatus.ACTIVE, "active")
+    assert status_of(first.id) == "indexed"
+    current = store.current_version()
+    assert current is not None
+    assert current.status is VersionStatus.ACTIVE
+
+
+def test_a_version_with_a_chunk_missing_from_the_vector_index_is_never_made_current(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1), art(2)])
+    store.upsert_chunks([indexed(1, 0, "good", 1)], {"9999.00001": "h1"})
+    first = store.publish_version()
+    store.upsert_chunks([indexed(1, 0, "good two", 1)], {"9999.00001": "h2"})
+    broken = indexed(2, 0, "no vector", 1)
+    store.upsert_chunks([broken], {"9999.00002": "h3"})
+    _stored("MATCH (c:Chunk {key: $key}) REMOVE c.embedding", key=broken.key)
+    with pytest.raises(VersionNotReadyError, match="1 of 2 chunks are not in the vector index"):
+        store.publish_version()
+    assert store.current_version() == first
+    assert readable(store, 1) == ["good"]
+    assert status_of(first.id + 1) == "pending"
+
+
+def test_a_version_with_a_chunk_missing_from_the_full_text_index_is_never_made_current(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1)])
+    broken = indexed(1, 0, "no text", 1)
+    store.upsert_chunks([broken], {"9999.00001": "h1"})
+    _stored("MATCH (c:Chunk {key: $key}) REMOVE c.search_text", key=broken.key)
+    with pytest.raises(VersionNotReadyError, match="not in the full-text index"):
+        store.publish_version()
+    assert store.current_version() is None
+
+
+def test_a_version_is_refused_while_an_index_is_not_online(
+    store: Neo4jStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "wait", 1)], {"9999.00001": "h1"})
+    monkeypatch.setattr(
+        "graphrag.adapters.neo4j_store.INDEX_STATES",
+        "RETURN 'chunk_text' AS name, 'POPULATING' AS state",
+    )
+    with pytest.raises(VersionNotReadyError, match="chunk_text is POPULATING"):
+        store.publish_version()
+    assert store.current_version() is None
+
+
+def test_versions_made_before_statuses_existed_are_migrated_by_the_next_publish(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "v1", 0)], {"9999.00001": "h1"})
+    first = store.publish_version()
+    store.upsert_chunks([indexed(1, 0, "v2", 0)], {"9999.00001": "h2"})
+    second = store.publish_version()
+    _stored("MATCH (v:Version) WHERE v.id >= $id REMOVE v.status", id=first.id)  # as T2 left them
+    current = store.current_version()
+    assert current is not None
+    assert (current.id, current.status) == (second.id, VersionStatus.ACTIVE)
+    store.upsert_chunks([indexed(1, 0, "v3", 0)], {"9999.00001": "h3"})
+    third = store.publish_version()
+    assert [status_of(v) for v in (first.id, second.id, third.id)] == [
+        "indexed",
+        "indexed",
+        "active",
+    ]
+
+
+def test_a_rollback_swaps_the_statuses_and_does_not_need_them_on_old_versions(
+    store: Neo4jStore,
+) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "before", 7)], {"9999.00001": "h1"})
+    first = store.publish_version()
+    store.upsert_chunks([indexed(1, 0, "after", 7)], {"9999.00001": "h2"})
+    second = store.publish_version()
+    _stored("MATCH (v:Version) WHERE v.id >= $id REMOVE v.status", id=first.id)  # as T2 left them
+    rolled_back = store.rollback()
+    assert (rolled_back.id, rolled_back.status) == (first.id, VersionStatus.ACTIVE)
+    assert (status_of(first.id), status_of(second.id)) == ("active", "indexed")
+    assert readable(store, 7) == ["before"]
+
+
+def test_a_rollback_never_goes_back_to_a_version_that_is_not_indexed(store: Neo4jStore) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "before", 7)], {"9999.00001": "h1"})
+    first = store.publish_version()
+    store.upsert_chunks([indexed(1, 0, "after", 7)], {"9999.00001": "h2"})
+    second = store.publish_version()
+    _stored("MATCH (v:Version {id: $id}) SET v.status = 'pending'", id=first.id)
+    with pytest.raises(LookupError, match="no earlier version"):
+        store.rollback()
+    assert store.current_version() == second
+
+
+def test_an_abandoned_pending_version_is_never_read_nor_a_rollback_target(
+    store: Neo4jStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.upsert_articles([art(1)])
+    store.upsert_chunks([indexed(1, 0, "stable", 5)], {"9999.00001": "h1"})
+    first = store.publish_version()
+    store.upsert_chunks([indexed(1, 0, "next", 5)], {"9999.00001": "h2"})
+    with monkeypatch.context() as failing:
+        failing.setattr(
+            "graphrag.adapters.neo4j_store.INDEX_STATES",
+            "RETURN 'chunk_text' AS name, 'FAILED' AS state",
+        )
+        with pytest.raises(VersionNotReadyError):
+            store.publish_version()  # a crash would leave the same pending version behind
+    third = store.publish_version()  # the next run goes on from the version that is current
+    assert status_of(first.id + 1) == "pending"
+    assert store.current_version() == third
+    assert readable(store, 5) == ["next"]
+    assert store.rollback().id == first.id  # the pending version is skipped
 
 
 def test_a_database_indexed_before_versions_existed_is_adopted_by_the_first_publish(

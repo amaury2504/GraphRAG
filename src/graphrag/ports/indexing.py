@@ -39,8 +39,12 @@ class ChunkStore(Protocol):
     def publish_version(self) -> VersionInfo:
         """Snapshot the chunks of every indexed article as a new version and make it current.
 
-        The new manifest and the move of the "current version" pointer happen in one
-        transaction: a reader sees the old version or the new one, never a mix.
+        The version is `pending` while its manifest is built, `indexed` once every chunk of the
+        manifest is in the vector and the full-text index, and `active` once the "current
+        version" pointer moves to it (the version it replaces becomes `indexed` again). The
+        pointer move is one transaction: a reader sees the old version or the new one, never a
+        mix. Raises VersionNotReadyError, leaving the active version as it was, if an index is
+        not online or does not hold every chunk.
         """
         ...
 
@@ -51,6 +55,7 @@ class ChunkStore(Protocol):
     def rollback(self) -> VersionInfo:
         """Make the version published before the current one current again, and return it.
 
+        Only an `indexed` version can be rolled back to; the one abandoned becomes `indexed`.
         Raises LookupError if there is no current version or no earlier one. Articles whose
         chunks differ from that version are marked as not indexed, so the next indexing run
         rebuilds them from their source text instead of silently bringing them back.

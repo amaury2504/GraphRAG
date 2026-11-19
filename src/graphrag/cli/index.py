@@ -16,7 +16,7 @@ from graphrag.cli.ingest import log_line
 from graphrag.domain.chunking import chunk_abstract, search_text
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
-from graphrag.domain.versioning import GcReport, VersionInfo
+from graphrag.domain.versioning import GcReport, VersionInfo, VersionNotReadyError
 from graphrag.ports.embedding import Embedder
 from graphrag.ports.indexing import ChunkStore
 from graphrag.settings import Settings
@@ -70,7 +70,10 @@ def run_indexing(
     version: VersionInfo | None = None
     if todo or store.current_version() is None:  # also adopts chunks indexed before versions
         version = store.publish_version()
-        log(f"chunks: version {version.id} published ({version.chunk_count} chunks)")
+        log(
+            f"chunks: version {version.id} published "
+            f"({version.chunk_count} chunks, {version.status})"
+        )
     return IndexReport(
         articles=len(todo),
         chunks=written,
@@ -82,7 +85,10 @@ def run_indexing(
 def run_rollback(store: ChunkStore, *, log: Callable[[str], None] = log_line) -> VersionInfo:
     """Make the previous version current again (the abandoned one's chunks stay until a gc)."""
     version = store.rollback()
-    log(f"chunks: rolled back to version {version.id} ({version.chunk_count} chunks)")
+    log(
+        f"chunks: rolled back to version {version.id} "
+        f"({version.chunk_count} chunks, {version.status})"
+    )
     return version
 
 
@@ -176,13 +182,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     log_line("loading the embedding model")
     embedder = load_default_embedder()
     with Neo4jStore(uri, user, password) as store:
-        report = run_indexing(
-            store,
-            embedder,
-            limit=args.limit,
-            batch_size=args.batch_size,
-            info=default_index_info(embedder.dimensions),
-        )
+        try:
+            report = run_indexing(
+                store,
+                embedder,
+                limit=args.limit,
+                batch_size=args.batch_size,
+                info=default_index_info(embedder.dimensions),
+            )
+        except VersionNotReadyError as error:
+            log_line(
+                f"chunks: {error}; the active version is unchanged, run again to build a new one"
+            )
+            return 4
     print(report)
     return 0
 

@@ -66,7 +66,10 @@ tests/
 #                              Les morceaux sont immuables (clé = article#position#empreinte du texte) et jamais
 #                              supprimés ; la recherche ne lit que la version courante, un instantané du corpus
 #                              publié en fin de run (nœuds Version, pointeur Current, bascule en une transaction).
-#                              --rollback : revient à la version précédente, sans indexer.
+#                              Statuts d'une version : pending (manifeste en construction) → indexed (index vectoriel
+#                              et texte intégral en ligne et couvrant tous ses morceaux, sinon exit 4 et la version
+#                              active ne change pas) → active (pointée par Current, seule lisible).
+#                              --rollback : revient à la version indexed précédente, sans indexer.
 #                              --gc [--keep N] [--min-age-days D] [--apply] : ramasse-miettes (mark and sweep),
 #                              sans indexer ni charger le modèle. Simulation par défaut ; --apply supprime les
 #                              versions au-delà des N plus récentes (défaut 3, minimum 2, sauf celles de moins de

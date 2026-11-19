@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import islice
 from typing import Any
@@ -17,7 +18,14 @@ from graphrag.domain.models import (
     SearchHit,
     WorkRecord,
 )
-from graphrag.domain.versioning import GcReport, VersionInfo, plan_retention
+from graphrag.domain.versioning import (
+    GcReport,
+    VersionInfo,
+    VersionNotReadyError,
+    VersionStatus,
+    ensure_indexed,
+    plan_retention,
+)
 
 WRITE_BATCH = 500
 
@@ -194,10 +202,20 @@ WITH a, [key IN collect(c.key) WHERE key IS NOT NULL] AS keys
 SET a.indexed_keys = keys
 """
 
+# Versions made before statuses existed: the one the pointer designates is active, the others
+# were readable once and can be rolled back to, so they are indexed.
+MIGRATE_VERSION_STATUSES = """
+MATCH (v:Version) WHERE v.status IS NULL
+OPTIONAL MATCH (:Current {name: $name})-[:POINTS_TO]->(current:Version)
+SET v.status = CASE WHEN current IS NOT NULL AND v = current THEN 'active' ELSE 'indexed' END
+"""
+
+# A version starts pending, chained to the active one: abandoned pending versions of an earlier
+# crash are not in the chain.
 CREATE_VERSION = """
 OPTIONAL MATCH (:Current {name: $name})-[:POINTS_TO]->(previous:Version)
 CALL { MATCH (v:Version) RETURN coalesce(max(v.id), 0) + 1 AS next }
-CREATE (version:Version {id: next, created_at: datetime(), chunk_count: 0})
+CREATE (version:Version {id: next, created_at: datetime(), chunk_count: 0, status: 'pending'})
 FOREACH (_ IN CASE WHEN previous IS NULL THEN [] ELSE [1] END |
          CREATE (version)-[:PREVIOUS]->(previous))
 RETURN version.id AS id
@@ -216,28 +234,55 @@ MATCH (version:Version {id: $id})
 OPTIONAL MATCH (version)-[:CONTAINS]->(c:Chunk)
 WITH version, count(c) AS n
 SET version.chunk_count = n
-RETURN version.id AS id, version.created_at AS created_at, n AS chunk_count
+RETURN version.id AS id, version.created_at AS created_at, n AS chunk_count,
+       version.status AS status
 """
 
-# Moving the pointer is a delete and a create inside the publishing transaction.
+# The version is readable once the chunks of its manifest are in both indexes: the indexes
+# must be online, and every chunk must hold what each index reads (a vector of the index's
+# size, a search text).
+INDEX_STATES = """
+SHOW INDEXES YIELD name, state WHERE name IN [$vector_index, $text_index]
+RETURN name, state
+"""
+
+MANIFEST_COVERAGE = """
+MATCH (version:Version {id: $id})
+OPTIONAL MATCH (version)-[:CONTAINS]->(c:Chunk)
+RETURN count(c) AS chunks,
+       count(CASE WHEN c.embedding IS NOT NULL AND size(c.embedding) = $dimensions
+                  THEN 1 END) AS with_vector,
+       count(CASE WHEN c.search_text IS NOT NULL THEN 1 END) AS with_text
+"""
+
+MARK_VERSION_INDEXED = "MATCH (v:Version {id: $id}) SET v.status = 'indexed'"
+
+# Moving the pointer makes the new version active and the one it replaces indexed again,
+# in one transaction.
 POINT_TO_VERSION = """
 MERGE (current:Current {name: $name})
 WITH current
-OPTIONAL MATCH (current)-[old:POINTS_TO]->(:Version)
+OPTIONAL MATCH (current)-[old:POINTS_TO]->(replaced:Version)
+SET replaced.status = 'indexed'
 DELETE old
 WITH DISTINCT current
 MATCH (version:Version {id: $id})
+SET version.status = 'active'
 CREATE (current)-[:POINTS_TO]->(version)
 """
 
 CURRENT_VERSION = """
 MATCH (:Current {name: $name})-[:POINTS_TO]->(v:Version)
-RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count
+RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count,
+       coalesce(v.status, 'active') AS status
 """
 
+# Only an indexed version can be rolled back to: a pending one is not complete.
 PREVIOUS_VERSION = """
 MATCH (:Current {name: $name})-[:POINTS_TO]->(:Version)-[:PREVIOUS]->(v:Version)
-RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count
+WHERE v.status = 'indexed'
+RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count,
+       v.status AS status
 """
 
 # After a rollback each article contributes to the next version the chunks that the version
@@ -255,7 +300,10 @@ GC_CHUNK_SCOPE = ""
 GC_VERSION_SCOPE = ""
 GC_BATCH = 1000  # chunks deleted per transaction
 
-VERSION_FIELDS = "v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count"
+VERSION_FIELDS = (
+    "v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count, "
+    "coalesce(v.status, 'indexed') AS status"
+)
 
 # The current version, then its predecessors back to the oldest one still linked.
 CHAIN_VERSIONS = f"""
@@ -341,6 +389,7 @@ def _version(record: Any) -> VersionInfo:
         id=int(record["id"]),
         created_at=record["created_at"].to_native(),
         chunk_count=int(record["chunk_count"]),
+        status=VersionStatus(record["status"]),
     )
 
 
@@ -588,17 +637,57 @@ class Neo4jStore:
             session.execute_write(write)
 
     def publish_version(self) -> VersionInfo:
-        def write(tx: neo4j.ManagedTransaction) -> VersionInfo:
+        """Build the manifest (pending), check the indexes cover it (indexed), then activate it.
+
+        The first step is one transaction, the last is another: a crash between them leaves a
+        pending or indexed version that no search reads, and the active one is unchanged.
+        """
+
+        def build(tx: neo4j.ManagedTransaction) -> VersionInfo:
             tx.run(ADOPT_LEGACY_CHUNKS).consume()
+            tx.run(MIGRATE_VERSION_STATUSES, name=CURRENT_NAME).consume()
             version_id = tx.run(CREATE_VERSION, name=CURRENT_NAME).single(strict=True)["id"]
             tx.run(FILL_MANIFEST, id=version_id).consume()
-            counted = tx.run(COUNT_MANIFEST, id=version_id).single(strict=True)
+            return _version(tx.run(COUNT_MANIFEST, id=version_id).single(strict=True))
+
+        def activate(tx: neo4j.ManagedTransaction, version_id: int) -> None:
             tx.run(POINT_TO_VERSION, name=CURRENT_NAME, id=version_id).consume()
-            return _version(counted)
 
         with self._driver.session() as session:
-            # one transaction: the manifest and the pointer change together or not at all
-            return session.execute_write(write)
+            pending = session.execute_write(build)
+            self._verify_indexed(session, pending)
+            session.run(MARK_VERSION_INDEXED, id=pending.id).consume()
+            session.execute_write(activate, pending.id)
+        return replace(pending, status=VersionStatus.ACTIVE)
+
+    @staticmethod
+    def _verify_indexed(session: neo4j.Session, version: VersionInfo) -> None:
+        """Wait for both indexes, then raise unless they cover every chunk of the version."""
+        for index in (VECTOR_INDEX, FULLTEXT_INDEX):
+            session.run(AWAIT_INDEX, name=index, seconds=INDEX_BUILD_SECONDS).consume()
+        states = {
+            r["name"]: r["state"]
+            for r in session.run(INDEX_STATES, vector_index=VECTOR_INDEX, text_index=FULLTEXT_INDEX)
+        }
+        problems = [
+            f"index {name} is {states[name]}" if name in states else f"index {name} does not exist"
+            for name in (VECTOR_INDEX, FULLTEXT_INDEX)
+            if states.get(name) != "ONLINE"
+        ]
+        if problems:
+            raise VersionNotReadyError(version.id, "; ".join(problems))
+        options = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single(strict=True)
+        coverage = session.run(
+            MANIFEST_COVERAGE,
+            id=version.id,
+            dimensions=options["options"]["indexConfig"]["vector.dimensions"],
+        ).single(strict=True)
+        ensure_indexed(
+            version.id,
+            chunks=coverage["chunks"],
+            with_vector=coverage["with_vector"],
+            with_text=coverage["with_text"],
+        )
 
     def current_version(self) -> VersionInfo | None:
         with self._driver.session() as session:
@@ -607,12 +696,13 @@ class Neo4jStore:
 
     def rollback(self) -> VersionInfo:
         def write(tx: neo4j.ManagedTransaction) -> VersionInfo:
+            tx.run(MIGRATE_VERSION_STATUSES, name=CURRENT_NAME).consume()
             previous = tx.run(PREVIOUS_VERSION, name=CURRENT_NAME).single()
             if previous is None:
                 raise LookupError("no earlier version to roll back to")
             tx.run(POINT_TO_VERSION, name=CURRENT_NAME, id=previous["id"]).consume()
             tx.run(RESTORE_ARTICLE_KEYS, id=previous["id"]).consume()
-            return _version(previous)
+            return replace(_version(previous), status=VersionStatus.ACTIVE)
 
         with self._driver.session() as session:
             return session.execute_write(write)
