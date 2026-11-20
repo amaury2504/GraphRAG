@@ -1,7 +1,9 @@
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import date
 
-from graphrag.domain.versioning import chunk_key
+from graphrag.domain.versioning import VectorSlot, chunk_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +110,14 @@ class IndexInfo:
     revision: str
     dimensions: int
     text_template: str  # how the embedded text is built, e.g. "title. chunk"
+
+    def slot(self) -> VectorSlot:
+        """Where vectors built this way are stored (the digest keeps two models apart)."""
+        payload = json.dumps(
+            [self.model, self.revision, self.dimensions, self.text_template]
+        ).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()[:12]
+        return VectorSlot(f"embedding_{digest}", f"chunk_embedding_{digest}")
 
     def differences(self, other: IndexInfo) -> list[str]:
         """Human-readable list of what differs from `other` (empty when identical)."""

@@ -1,6 +1,7 @@
 """Local embeddings with sentence-transformers (BAAI/bge-small-en-v1.5 by default)."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from graphrag.domain.chunking import TEXT_TEMPLATE
@@ -89,16 +90,49 @@ class SentenceTransformerEmbedder:
         return vectors
 
 
-def default_index_info(dimensions: int) -> IndexInfo:
-    """The fingerprint of an index built with the pinned model and the title+chunk text."""
-    return IndexInfo(MODEL_NAME, MODEL_REVISION, dimensions, TEXT_TEMPLATE)
+@dataclass(frozen=True, slots=True)
+class EmbeddingModelSpec:
+    """A model the application knows how to load: pinned revision and query instruction."""
+
+    name: str
+    revision: str
+    query_instruction: str
 
 
-def load_default_embedder(*, cache_folder: str | None = None) -> SentenceTransformerEmbedder:
-    """Load the pinned bge-small model (downloaded once, then read from the local cache)."""
+# The models that can be selected with EMBEDDING_MODEL. A new entry is a pinned revision; the
+# index, the searches and the evaluation follow the model of the active version.
+EMBEDDING_MODELS: Mapping[str, EmbeddingModelSpec] = {
+    MODEL_NAME: EmbeddingModelSpec(MODEL_NAME, MODEL_REVISION, QUERY_INSTRUCTION),
+}
+
+
+def model_spec(
+    name: str, registry: Mapping[str, EmbeddingModelSpec] | None = None
+) -> EmbeddingModelSpec:
+    models = EMBEDDING_MODELS if registry is None else registry
+    if name not in models:
+        raise ValueError(f"unknown embedding model {name!r}; known models: {', '.join(models)}")
+    return models[name]
+
+
+def index_info_for(
+    name: str, dimensions: int, registry: Mapping[str, EmbeddingModelSpec] | None = None
+) -> IndexInfo:
+    """The fingerprint of vectors built with the named model and the title+chunk text."""
+    return IndexInfo(name, model_spec(name, registry).revision, dimensions, TEXT_TEMPLATE)
+
+
+def load_embedder(
+    name: str = MODEL_NAME,
+    *,
+    cache_folder: str | None = None,
+    registry: Mapping[str, EmbeddingModelSpec] | None = None,
+) -> SentenceTransformerEmbedder:
+    """Load the named model at its pinned revision (downloaded once, then read from the cache)."""
     from sentence_transformers import SentenceTransformer  # heavy import, only when needed
 
+    spec = model_spec(name, registry)
     model = SentenceTransformer(
-        MODEL_NAME, revision=MODEL_REVISION, device="cpu", cache_folder=cache_folder
+        spec.name, revision=spec.revision, device="cpu", cache_folder=cache_folder
     )
-    return SentenceTransformerEmbedder(model)
+    return SentenceTransformerEmbedder(model, query_instruction=spec.query_instruction)

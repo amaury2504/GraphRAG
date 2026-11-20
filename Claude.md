@@ -75,7 +75,17 @@ tests/
 #                              versions au-delà des N plus récentes (défaut 3, minimum 2, sauf celles de moins de
 #                              D jours) puis les morceaux hors de toute version gardée et hors des morceaux que
 #                              chaque article prépare pour la prochaine version (donc sans risque pendant un `index`).
-#                              Code retour 2 si aucune version n'est publiée ou si --keep < 2.)
+#                              Code retour 2 si aucune version n'est publiée ou si --keep < 2.
+#                              Supprime aussi l'index vectoriel (et les vecteurs) d'un modèle d'embedding que
+#                              seules les versions abandonnées utilisaient ; jamais celui d'un ré-encodage en cours.)
+#                              --reembed : bascule vers le modèle de EMBEDDING_MODEL (clé de EMBEDDING_MODELS dans
+#                              adapters/sentence_transformer.py ; défaut bge-small). Chaque modèle a sa propriété
+#                              (`embedding_<empreinte>`) et son index vectoriel sur les morceaux ; l'ancien reste
+#                              servi pendant le calcul des nouveaux vecteurs (reprenable), puis une version lue avec
+#                              le nouveau modèle est publiée (pending → indexed → active, même bascule atomique) ;
+#                              `--rollback` redonne l'ancien modèle. Chaque version porte l'empreinte du modèle ;
+#                              `index`, l'API, `evaluate` et `pool` refusent un modèle autre que celui de la version
+#                              active. Code retour 2 sans version publiée, 4 si les index ne couvrent pas la version.
 #                              Relancer `ingest` détecte les articles modifiés, puis `index` les ré-indexe.)
 # LLM de /ask               : LLM_PROVIDER=mistral (défaut) | claude (commande locale `claude -p`, usage personnel, pas dans Docker)
 # question (API)             : POST /ask {"question": "...", "configuration": "vector"|"hybrid", "k": 5}  (réponse : + timings)

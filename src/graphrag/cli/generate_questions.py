@@ -18,7 +18,7 @@ from graphrag.adapters.question_file import (
     read_questions,
     write_records,
 )
-from graphrag.adapters.sentence_transformer import load_default_embedder
+from graphrag.adapters.sentence_transformer import load_embedder
 from graphrag.cli.ingest import log_line
 from graphrag.domain.evaluation import QUESTION_STYLES, QUESTION_TYPES, EvalQuestion
 from graphrag.pipeline.question_generation import (
@@ -106,7 +106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not key and not args.dry_run:
         print("MISTRAL_API_KEY is not set")
         return 2
-    embedder = load_default_embedder()
+    embedder = load_embedder(settings.embedding_model)
     meter = UsageMeter(settings.token_alert)
     with Neo4jStore(
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()

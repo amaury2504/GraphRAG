@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from graphrag.adapters.sentence_transformer import load_default_embedder
+from graphrag.adapters.sentence_transformer import load_embedder
 
 pytestmark = pytest.mark.model
 
@@ -14,7 +14,7 @@ def dot(a: list[float], b: list[float]) -> float:
 
 
 def test_bge_small_vectors_rank_the_relevant_passage_first() -> None:
-    embedder = load_default_embedder()
+    embedder = load_embedder()
     assert embedder.dimensions == 384
     passages = [
         "Retrieval-augmented generation grounds a language model in retrieved documents.",

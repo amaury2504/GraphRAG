@@ -3,6 +3,10 @@
 Only articles whose hash (title, abstract, chunker version) differs from the one they were
 indexed from are processed: a rerun resumes where the last one stopped, picks up new and
 modified articles, and leaves the others untouched.
+
+`--reembed` switches to another embedding model (EMBEDDING_MODEL): the new vectors are built
+beside the old ones while searches keep reading the active version, then a new version read
+with them becomes active in one step.
 """
 
 import argparse
@@ -11,7 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from graphrag.adapters.neo4j_store import Neo4jStore
-from graphrag.adapters.sentence_transformer import default_index_info, load_default_embedder
+from graphrag.adapters.sentence_transformer import index_info_for, load_embedder
 from graphrag.cli.ingest import log_line
 from graphrag.domain.chunking import chunk_abstract, search_text
 from graphrag.domain.hashing import article_hash
@@ -53,9 +57,9 @@ def run_indexing(
     log: Callable[[str], None] = log_line,
     info: IndexInfo | None = None,
 ) -> IndexReport:
-    store.ensure_chunk_schema(embedder.dimensions)
     if info is not None:
-        store.ensure_index_info(info)
+        store.ensure_index_info(info)  # refuses a model other than the active one
+    store.ensure_chunk_schema(embedder.dimensions, info)
     todo = stale_articles(store.articles_with_index_state(), limit)
     log(f"chunks: {len(todo)} articles to index")
     written = 0
@@ -64,12 +68,12 @@ def run_indexing(
         indexed = index_articles(batch, embedder)
         # New chunks and the hash of these articles land in one transaction; readers do not
         # see them before the version is published.
-        store.upsert_chunks(indexed, {a.arxiv_id: article_hash(a) for a in batch})
+        store.upsert_chunks(indexed, {a.arxiv_id: article_hash(a) for a in batch}, info)
         written += len(indexed)
         log(f"chunks: {start + len(batch)}/{len(todo)} articles indexed, {written} chunks")
     version: VersionInfo | None = None
     if todo or store.current_version() is None:  # also adopts chunks indexed before versions
-        version = store.publish_version()
+        version = store.publish_version(info)
         log(
             f"chunks: version {version.id} published "
             f"({version.chunk_count} chunks, {version.status})"
@@ -80,6 +84,42 @@ def run_indexing(
         total_chunks=store.chunk_count(),
         version=None if version is None else version.id,
     )
+
+
+def run_reembed(
+    store: ChunkStore,
+    embedder: Embedder,
+    info: IndexInfo,
+    *,
+    batch_size: int = ARTICLES_PER_BATCH,
+    log: Callable[[str], None] = log_line,
+) -> VersionInfo | None:
+    """Give every chunk of the next version a vector of the model `info`, then switch to it.
+
+    The old vectors stay where they are and searches keep reading the active version until the
+    new one is published (None is returned, and nothing done, if `info` is already active).
+    Resumable: a run that stopped goes on with the chunks that still have no vector.
+    """
+    if store.current_version() is None:
+        raise LookupError("no version published yet: index first, there is nothing to re-embed")
+    if store.active_index_info() == info:
+        log(f"reembed: the active version already uses {info.model}")
+        return None
+    store.ensure_chunk_schema(embedder.dimensions, info)
+    done = 0
+    while missing := store.chunks_missing_vector(info, batch_size):
+        vectors = embedder.embed_documents([text for _key, text in missing])
+        store.set_chunk_vectors(
+            info, {key: vector for (key, _text), vector in zip(missing, vectors, strict=True)}
+        )
+        done += len(missing)
+        log(f"reembed: {done} chunks embedded with {info.model}")
+    version = store.publish_version(info)
+    log(
+        f"reembed: version {version.id} published with {info.model} "
+        f"({version.chunk_count} chunks, {version.status})"
+    )
+    return version
 
 
 def run_rollback(store: ChunkStore, *, log: Callable[[str], None] = log_line) -> VersionInfo:
@@ -108,7 +148,11 @@ def run_gc(
     report = store.collect_garbage(keep=keep, min_age_days=min_age_days, apply=apply)
     kept = ", ".join(str(v) for v in report.kept_versions)
     log(f"gc: versions kept {kept}" if apply else f"gc: dry run, versions kept {kept}")
-    if not report.dropped_versions and not report.unreferenced_chunks:
+    if (
+        not report.dropped_versions
+        and not report.unreferenced_chunks
+        and not report.dropped_vector_indexes
+    ):
         log("gc: nothing to remove")
         return report
     dropped = ", ".join(str(v) for v in report.dropped_versions)
@@ -116,6 +160,10 @@ def run_gc(
         f"{_plural(len(report.dropped_versions), 'version')} ({dropped}) "
         f"and {_plural(report.unreferenced_chunks, 'chunk')}"
     )
+    if report.dropped_vector_indexes:
+        indexes = ", ".join(report.dropped_vector_indexes)
+        noun = "index" if len(report.dropped_vector_indexes) == 1 else "indexes"
+        what += f", and the vector {noun} {indexes}"
     log(f"gc: dropped {what}" if apply else f"gc: would drop {what}, rerun with --apply to delete")
     return report
 
@@ -140,6 +188,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--gc",
         action="store_true",
         help="garbage-collect old versions and unreferenced chunks (dry run unless --apply)",
+    )
+    mode.add_argument(
+        "--reembed",
+        action="store_true",
+        help="switch to the model of EMBEDDING_MODEL: embed every chunk with it, then publish "
+        "a version read with it (no indexing of articles)",
     )
     parser.add_argument(
         "--keep", type=int, default=DEFAULT_KEPT_VERSIONS, help="versions to keep (--gc, min 2)"
@@ -180,21 +234,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
         return 0
     log_line("loading the embedding model")
-    embedder = load_default_embedder()
+    embedder = load_embedder(settings.embedding_model)
+    info = index_info_for(settings.embedding_model, embedder.dimensions)
+    if args.reembed:
+        with Neo4jStore(uri, user, password) as store:
+            try:
+                run_reembed(store, embedder, info, batch_size=args.batch_size)
+            except LookupError as error:
+                log_line(f"reembed: {error}")
+                return 2
+            except VersionNotReadyError as error:
+                log_line(f"reembed: {error}; the active version is unchanged, run again to resume")
+                return 4
+        return 0
     with Neo4jStore(uri, user, password) as store:
         try:
             report = run_indexing(
-                store,
-                embedder,
-                limit=args.limit,
-                batch_size=args.batch_size,
-                info=default_index_info(embedder.dimensions),
+                store, embedder, limit=args.limit, batch_size=args.batch_size, info=info
             )
         except VersionNotReadyError as error:
             log_line(
                 f"chunks: {error}; the active version is unchanged, run again to build a new one"
             )
             return 4
+        except ValueError as error:  # another model than the active one: --reembed switches
+            log_line(f"chunks: {error}")
+            return 2
     print(report)
     return 0
 

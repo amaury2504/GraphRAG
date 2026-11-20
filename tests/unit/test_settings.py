@@ -28,6 +28,18 @@ def test_missing_secrets_fail_fast() -> None:
     assert missing == {"neo4j_password", "postgres_dsn"}
 
 
+def test_the_embedding_model_defaults_to_the_pinned_one_and_can_be_chosen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphrag.adapters.sentence_transformer import MODEL_NAME
+
+    monkeypatch.setenv("NEO4J_PASSWORD", "pw")
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://u:p@db/x")
+    assert Settings().embedding_model == MODEL_NAME  # type: ignore[call-arg]
+    monkeypatch.setenv("EMBEDDING_MODEL", "other/model")
+    assert Settings().embedding_model == "other/model"  # type: ignore[call-arg]
+
+
 def test_secrets_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEO4J_PASSWORD", "topsecret")
     monkeypatch.setenv("POSTGRES_DSN", "postgresql://u:dbsecret@db/x")
