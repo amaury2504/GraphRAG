@@ -10,7 +10,9 @@ from graphrag.cli.index import (
     run_indexing,
     run_reembed,
     run_rollback,
+    stale_articles,
 )
+from graphrag.domain.chunking import ChunkerConfig
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
 from graphrag.domain.versioning import GcReport, VersionInfo, VersionNotReadyError
@@ -156,6 +158,41 @@ def test_chunks_are_matched_to_their_own_article_title() -> None:
         ("2401.00001", "Title 1. One sentence."),
         ("2401.00002", "Title 2. One sentence."),
     ]
+
+
+def test_a_smaller_chunk_size_gives_more_chunks() -> None:
+    abstract = long_abstract(4)  # 4 sentences of 40 words
+    default = index_articles([article(1, abstract)], FakeEmbedder())
+    small = index_articles([article(1, abstract)], FakeEmbedder(), ChunkerConfig(max_words=50))
+    assert len(default) == 1
+    assert len(small) > 1
+    assert all(len(c.chunk.text.split()) <= 50 for c in small)
+
+
+def test_the_overlap_setting_reaches_the_chunker() -> None:
+    abstract = long_abstract(4)
+    config = ChunkerConfig(max_words=90, overlap_sentences=0)
+    texts = [c.chunk.text for c in index_articles([article(1, abstract)], FakeEmbedder(), config)]
+    assert len(texts) == 2
+    assert not set(texts[0].split(". ")) & set(texts[1].split(". "))
+
+
+def test_stale_articles_follow_the_chunker_config() -> None:
+    states = [ArticleIndexState(article(1), article_hash(article(1)))]
+    assert stale_articles(states) == []
+    assert stale_articles(states, config=ChunkerConfig(max_words=100)) == [article(1)]
+
+
+def test_a_new_chunker_config_reindexes_and_publishes_a_new_version() -> None:
+    store = FakeChunkStore([article(1, long_abstract(4))])
+    first = run_indexing(store, FakeEmbedder(), log=quiet)
+    config = ChunkerConfig(max_words=50)
+    second = run_indexing(store, FakeEmbedder(), log=quiet, config=config)
+    assert (first.version, second.version) == (1, 2)
+    assert second.articles == 1
+    assert second.chunks > first.chunks
+    again = run_indexing(store, FakeEmbedder(), log=quiet, config=config)
+    assert again.articles == 0
 
 
 def test_run_creates_schema_with_embedder_dimensions_and_indexes_all() -> None:

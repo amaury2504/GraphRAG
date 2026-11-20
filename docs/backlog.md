@@ -6,7 +6,7 @@
 
 | Tâche | Contenu | Dépend de | État |
 | --- | --- | --- | --- |
-| T7 | Balayage de la taille de chunk et de l'overlap sur `eval/` (recall@k, MRR) ; relancer l'évaluation après chaque changement de chunker ou de modèle | T1 | libre |
+| T7 | Balayage de la taille de chunk et de l'overlap sur `eval/` (recall@k, MRR) ; relancer l'évaluation après chaque changement de chunker ou de modèle. Outil livré (`graphrag.cli.sweep`) ; reste à lancer le vrai balayage une fois ~50 questions validées (3 aujourd'hui) | T1 | en cours |
 
 ## Fait
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.sentence_transformer import index_info_for, load_embedder
 from graphrag.cli.ingest import log_line
-from graphrag.domain.chunking import chunk_abstract, search_text
+from graphrag.domain.chunking import ChunkerConfig, chunk_abstract, search_text
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
 from graphrag.domain.versioning import GcReport, VersionInfo, VersionNotReadyError
@@ -37,8 +37,15 @@ class IndexReport:
     version: int | None = None  # the version published by this run, None if it published none
 
 
-def index_articles(articles: Sequence[Article], embedder: Embedder) -> list[IndexedChunk]:
-    chunks = [c for a in articles for c in chunk_abstract(a.arxiv_id, a.abstract)]
+def index_articles(
+    articles: Sequence[Article], embedder: Embedder, config: ChunkerConfig | None = None
+) -> list[IndexedChunk]:
+    config = config or ChunkerConfig()
+    chunks = [
+        c
+        for a in articles
+        for c in chunk_abstract(a.arxiv_id, a.abstract, config.max_words, config.overlap_sentences)
+    ]
     titles = {a.arxiv_id: a.title for a in articles}
     texts = [search_text(titles[c.arxiv_id], c.text) for c in chunks]
     vectors = embedder.embed_documents(texts)
@@ -56,19 +63,20 @@ def run_indexing(
     batch_size: int = ARTICLES_PER_BATCH,
     log: Callable[[str], None] = log_line,
     info: IndexInfo | None = None,
+    config: ChunkerConfig | None = None,
 ) -> IndexReport:
     if info is not None:
         store.ensure_index_info(info)  # refuses a model other than the active one
     store.ensure_chunk_schema(embedder.dimensions, info)
-    todo = stale_articles(store.articles_with_index_state(), limit)
+    todo = stale_articles(store.articles_with_index_state(), limit, config)
     log(f"chunks: {len(todo)} articles to index")
     written = 0
     for start in range(0, len(todo), batch_size):
         batch = todo[start : start + batch_size]
-        indexed = index_articles(batch, embedder)
+        indexed = index_articles(batch, embedder, config)
         # New chunks and the hash of these articles land in one transaction; readers do not
         # see them before the version is published.
-        store.upsert_chunks(indexed, {a.arxiv_id: article_hash(a) for a in batch}, info)
+        store.upsert_chunks(indexed, {a.arxiv_id: article_hash(a, config) for a in batch}, info)
         written += len(indexed)
         log(f"chunks: {start + len(batch)}/{len(todo)} articles indexed, {written} chunks")
     version: VersionInfo | None = None
@@ -168,9 +176,13 @@ def run_gc(
     return report
 
 
-def stale_articles(states: Sequence[ArticleIndexState], limit: int | None = None) -> list[Article]:
+def stale_articles(
+    states: Sequence[ArticleIndexState],
+    limit: int | None = None,
+    config: ChunkerConfig | None = None,
+) -> list[Article]:
     """Articles whose current hash differs from the one they were indexed from (or none)."""
-    stale = [s.article for s in states if s.indexed_hash != article_hash(s.article)]
+    stale = [s.article for s in states if s.indexed_hash != article_hash(s.article, config)]
     return stale if limit is None else stale[:limit]
 
 

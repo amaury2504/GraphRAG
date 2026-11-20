@@ -2,7 +2,12 @@ from datetime import date
 
 import pytest
 
-from graphrag.domain.chunking import CHUNKER_VERSION, DEFAULT_MAX_WORDS, chunk_abstract
+from graphrag.domain.chunking import (
+    CHUNKER_VERSION,
+    DEFAULT_MAX_WORDS,
+    ChunkerConfig,
+    chunk_abstract,
+)
 from graphrag.domain.hashing import article_hash, chunker_fingerprint, content_hash
 from graphrag.domain.models import Article
 
@@ -62,3 +67,21 @@ def test_the_chunker_output_is_pinned_so_a_change_forces_a_version_bump() -> Non
         "Third Third Third Third Third ends now.",
     ]
     assert CHUNKER_VERSION == "1"
+
+
+def test_default_config_keeps_the_historical_fingerprint() -> None:
+    assert chunker_fingerprint(ChunkerConfig()) == chunker_fingerprint()
+    assert chunker_fingerprint() == f"{CHUNKER_VERSION}/{DEFAULT_MAX_WORDS}"
+
+
+def test_a_different_size_or_overlap_changes_the_fingerprint_and_the_hash() -> None:
+    base = chunker_fingerprint()
+    assert chunker_fingerprint(ChunkerConfig(max_words=100)) != base
+    assert chunker_fingerprint(ChunkerConfig(overlap_sentences=0)) != base
+    assert chunker_fingerprint(ChunkerConfig(overlap_sentences=2)) != chunker_fingerprint(
+        ChunkerConfig(overlap_sentences=0)
+    )
+    assert content_hash("T", "A", ChunkerConfig(max_words=100)) != content_hash("T", "A")
+    assert article_hash(article(), ChunkerConfig(max_words=100)) == content_hash(
+        "Title", "Abstract.", ChunkerConfig(max_words=100)
+    )

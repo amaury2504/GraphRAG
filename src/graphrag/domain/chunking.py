@@ -1,8 +1,20 @@
 import re
+from dataclasses import dataclass
 
 from graphrag.domain.models import Chunk
 
 DEFAULT_MAX_WORDS = 200
+DEFAULT_OVERLAP_SENTENCES = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkerConfig:
+    """The settings the chunks depend on (besides CHUNKER_VERSION): swept by the T7 evaluation."""
+
+    max_words: int = DEFAULT_MAX_WORDS
+    overlap_sentences: int = DEFAULT_OVERLAP_SENTENCES
+
+
 # Raise it whenever the chunking changes: it is part of every article hash, so all articles
 # are then re-chunked and re-embedded on the next indexing run.
 CHUNKER_VERSION = "1"
@@ -37,16 +49,22 @@ def search_text(title: str, chunk_text: str) -> str:
 
 
 def chunk_abstract(
-    arxiv_id: str, abstract: str, max_words: int = DEFAULT_MAX_WORDS
+    arxiv_id: str,
+    abstract: str,
+    max_words: int = DEFAULT_MAX_WORDS,
+    overlap_sentences: int = DEFAULT_OVERLAP_SENTENCES,
 ) -> tuple[Chunk, ...]:
     """Cut an abstract into chunks of at most `max_words` words, on sentence boundaries.
 
     An abstract that fits is a single chunk. A longer one is split greedily, and each chunk
-    after the first repeats the last sentence of the previous one (overlap) when it fits.
+    after the first repeats up to `overlap_sentences` last sentences of the previous one
+    (overlap), as many as still leave room for the next sentence.
     A single sentence longer than `max_words` is cut by words.
     """
     if max_words < 1:
         raise ValueError("max_words must be at least 1")
+    if overlap_sentences < 0:
+        raise ValueError("overlap_sentences must not be negative")
 
     pieces: list[str] = []
     for sentence in split_sentences(abstract):
@@ -65,11 +83,12 @@ def chunk_abstract(
         n = len(piece.split())
         if current and current_words + n > max_words:
             groups.append(current)
-            overlap = current[-1]
-            if len(overlap.split()) + n <= max_words:
-                current, current_words = [overlap], len(overlap.split())
-            else:
-                current, current_words = [], 0
+            overlap = current[-overlap_sentences:] if overlap_sentences else []
+            overlap_words = sum(len(s.split()) for s in overlap)
+            while overlap and overlap_words + n > max_words:
+                overlap_words -= len(overlap[0].split())
+                overlap = overlap[1:]
+            current, current_words = list(overlap), overlap_words
         current.append(piece)
         current_words += n
     if current:
