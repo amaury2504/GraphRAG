@@ -7,6 +7,6 @@
   "worktree_root": "../GraphRAG-wt",
   "branch_prefix": "agent/",
   "gate": "uv run python scripts/gates.py --skip mutation --skip gitleaks",
-  "merge_method": "squash",
+  "merge_method": "merge",
   "wave_size": 10
 }
