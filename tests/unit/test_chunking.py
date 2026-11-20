@@ -118,3 +118,37 @@ def test_overlap_is_kept_when_it_fills_the_chunk_exactly() -> None:
     s1, s2, s3 = sentence(5, "a"), sentence(5, "b"), sentence(5, "c")
     chunks = chunk_abstract("1", f"{s1} {s2} {s3}", max_words=10)
     assert [c.text for c in chunks] == [f"{s1} {s2}", f"{s2} {s3}"]
+
+
+def test_overlap_zero_repeats_nothing() -> None:
+    s1, s2, s3 = sentence(4, "a"), sentence(4, "b"), sentence(4, "c")
+    chunks = chunk_abstract("1", f"{s1} {s2} {s3}", max_words=9, overlap_sentences=0)
+    assert [c.text for c in chunks] == [f"{s1} {s2}", s3]
+
+
+def test_overlap_two_repeats_the_last_two_sentences_when_they_fit() -> None:
+    sents = [sentence(3, f"s{i}_") for i in range(5)]
+    chunks = chunk_abstract("1", " ".join(sents), max_words=9, overlap_sentences=2)
+    assert [c.text for c in chunks] == [
+        " ".join(sents[0:3]),
+        " ".join(sents[1:4]),
+        " ".join(sents[2:5]),
+    ]
+
+
+def test_overlap_drops_its_oldest_sentences_until_it_fits() -> None:
+    s1, s2, s3 = sentence(3, "a"), sentence(3, "b"), sentence(5, "c")
+    chunks = chunk_abstract("1", f"{s1} {s2} {s3}", max_words=8, overlap_sentences=2)
+    assert [c.text for c in chunks] == [f"{s1} {s2}", f"{s2} {s3}"]
+
+
+def test_one_sentence_overlap_is_the_default() -> None:
+    text = " ".join(sentence(4, f"s{i}_") for i in range(6))
+    assert chunk_abstract("1", text, max_words=9) == chunk_abstract(
+        "1", text, max_words=9, overlap_sentences=1
+    )
+
+
+def test_negative_overlap_is_refused() -> None:
+    with pytest.raises(ValueError, match="overlap_sentences"):
+        chunk_abstract("1", "text", overlap_sentences=-1)

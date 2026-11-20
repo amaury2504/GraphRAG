@@ -100,6 +100,14 @@ tests/
 #                              (--split : régler sur « tune », rapporter sur « report » ; nDCG@10 et écart minimal détectable affichés)
 #                              (rappel@k et MRR pour vector et hybrid, sans LLM ; questions dans eval/questions.jsonl,
 #                              seules celles avec "validated": true sont utilisées ; rapport JSON dans eval/results/)
+# balayage du chunker (T7)   : docker compose --profile test up -d --wait neo4j-test, puis
+#                              uv run python -m graphrag.cli.sweep [--split tune|report] [--sizes 60 100 150 200]
+#                              [--overlaps 0 1] [--target-uri bolt://localhost:7688] [--include-unvalidated]
+#                              (sans LLM ; lit les articles de la vraie base, indexe chaque réglage taille de chunk
+#                              × overlap en phrases dans la base JETABLE, jamais dans la vraie ; refuse la vraie base
+#                              (code 2) ; rapport eval/results/sweep_*.json. Choisir sur « tune », vérifier le
+#                              gagnant une fois sur « report ». Changer le défaut = éditer chunking.py, monter
+#                              CHUNKER_VERSION, ré-indexer ; à refaire après tout changement de chunker ou de modèle.)
 # pooling des jugements      : uv run python -m graphrag.cli.pool [--depth 10]   (sans LLM ; écrit eval/pool_review.jsonl :
 #                              mettre "relevant": true/false sur chaque article, puis
 #                              uv run python -m graphrag.cli.pool --apply eval/pool_review.jsonl)

@@ -62,12 +62,21 @@
     },
     "t7": {
       "titre": "T7 Balayage taille de chunk et overlap",
-      "contenu": "Mesurer recall@k et MRR sur eval/ pour plusieurs tailles et recouvrements ; relancer l'évaluation après chaque changement de chunker ou de modèle",
+      "contenu": "Outil livré : graphrag.cli.sweep mesure recall@k et MRR sur eval/ pour plusieurs tailles et recouvrements, dans la base jetable ; le balayage réel est la tâche t9",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "fait",
+      "branche": "feat/t7-chunk-sweep",
+      "worktree": "../GraphRAG-wt/t7"
+    },
+    "t9": {
+      "titre": "T9 Lancer le balayage réel du chunker",
+      "contenu": "Valider environ 50 questions (3 aujourd'hui), lancer graphrag.cli.sweep sur tune, vérifier le gagnant sur report, décider avec l'auteur du défaut (chunking.py, CHUNKER_VERSION, ré-indexation) ; vérifier CHUNKS_PER_ARTICLE = 2 avec des morceaux courts ; relancer après tout changement de chunker ou de modèle",
       "type": "mesure",
       "source": "docs/backlog.md",
       "etat": "a-faire",
-      "branche": "agent/t7",
-      "worktree": "../GraphRAG-wt/t7"
+      "branche": "agent/t9",
+      "worktree": "../GraphRAG-wt/t9"
     },
     "t8": {
       "titre": "T8 Base Neo4j jetable pour les tests d'intégration",
