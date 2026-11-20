@@ -194,16 +194,16 @@ def build_answerer(settings: Settings) -> QuestionAnswerer:
     # Imported here: they pull in torch, which /health does not need.
     from graphrag.adapters.mistral import MistralLLM, mistral_client
     from graphrag.adapters.neo4j_store import Neo4jStore
-    from graphrag.adapters.sentence_transformer import default_index_info, load_default_embedder
+    from graphrag.adapters.sentence_transformer import index_info_for, load_embedder
     from graphrag.pipeline.retrieval import HybridRetriever, VectorRetriever
     from graphrag.pipeline.usage import MeteredLLM, UsageMeter
 
     store = Neo4jStore(
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     )
-    embedder = load_default_embedder()
     try:
-        store.check_index_info(default_index_info(embedder.dimensions))
+        embedder = load_embedder(settings.embedding_model)
+        store.check_index_info(index_info_for(settings.embedding_model, embedder.dimensions))
     except ValueError as exc:
         store.close()
         raise NotConfiguredError(str(exc)) from exc

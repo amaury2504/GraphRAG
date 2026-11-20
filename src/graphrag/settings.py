@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     # Empty or missing: /ask answers 503 and everything else keeps working.
     mistral_api_key: SecretStr | None = None
     mistral_model: str = "mistral-small-latest"
+    # The embedding model (a key of adapters.sentence_transformer.EMBEDDING_MODELS) that searches
+    # and indexing use. It must be the model of the active index version: `index --reembed`
+    # builds the vectors of a new one and switches to it.
+    embedding_model: str = "BAAI/bge-small-en-v1.5"
     # Which model writes the answers. "claude" runs the local `claude -p` command (personal
     # use, see adapters/claude_headless.py) and needs no Mistral key.
     llm_provider: Literal["mistral", "claude"] = "mistral"

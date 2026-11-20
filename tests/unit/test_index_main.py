@@ -55,7 +55,12 @@ def stubbed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     RecordingStore.gc_error = None
     RecordingStore.gc_calls = []
     secret = SimpleNamespace(get_secret_value=lambda: "secret")
-    settings = SimpleNamespace(neo4j_uri="bolt://db", neo4j_user="neo", neo4j_password=secret)
+    settings = SimpleNamespace(
+        neo4j_uri="bolt://db",
+        neo4j_user="neo",
+        neo4j_password=secret,
+        embedding_model="test/model",
+    )
     monkeypatch.setattr(index_cli, "Settings", lambda: settings)
     monkeypatch.setattr(index_cli, "Neo4jStore", RecordingStore)
     monkeypatch.setattr(index_cli, "log_line", lambda _message: None)
@@ -64,10 +69,10 @@ def stubbed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_rollback_opens_the_store_and_rolls_back_without_loading_the_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def forbidden() -> None:
+    def forbidden(_name: str) -> None:
         raise AssertionError("rolling back must not load the embedding model")
 
-    monkeypatch.setattr(index_cli, "load_default_embedder", forbidden)
+    monkeypatch.setattr(index_cli, "load_embedder", forbidden)
     assert index_cli.main(["--rollback"]) == 0
     assert RecordingStore.opened == [("bolt://db", "neo", "secret")]
 
@@ -90,8 +95,8 @@ def test_a_version_the_indexes_do_not_cover_exits_with_4_and_says_why(
 
     lines: list[str] = []
     monkeypatch.setattr(index_cli, "log_line", lines.append)
-    monkeypatch.setattr(index_cli, "load_default_embedder", StubEmbedder)
-    monkeypatch.setattr(index_cli, "default_index_info", lambda _dimensions: None)
+    monkeypatch.setattr(index_cli, "load_embedder", lambda _name: StubEmbedder())
+    monkeypatch.setattr(index_cli, "index_info_for", lambda _name, _dimensions: None)
     monkeypatch.setattr(index_cli, "run_indexing", refuse)
     assert index_cli.main([]) == 4
     assert lines[-1] == (
@@ -110,24 +115,100 @@ def test_indexing_runs_with_the_embedder_and_prints_the_report(
         return index_cli.IndexReport(articles=1, chunks=2, total_chunks=3, version=4)
 
     info = IndexInfo("m", "r", 2, "title. chunk")
-    monkeypatch.setattr(index_cli, "load_default_embedder", StubEmbedder)
-    monkeypatch.setattr(index_cli, "default_index_info", lambda _dimensions: info)
+    names: list[str] = []
+
+    def load(name: str) -> StubEmbedder:
+        names.append(name)
+        return StubEmbedder()
+
+    monkeypatch.setattr(index_cli, "load_embedder", load)
+    monkeypatch.setattr(index_cli, "index_info_for", lambda _name, _dimensions: info)
     monkeypatch.setattr(index_cli, "run_indexing", fake_run)
     assert index_cli.main(["--limit", "5", "--batch-size", "7"]) == 0
     assert (calls["limit"], calls["batch_size"], calls["info"]) == (5, 7, info)
+    assert names == ["test/model"]  # the model comes from EMBEDDING_MODEL
     assert isinstance(calls["store"], RecordingStore)
     assert capsys.readouterr().out.strip() == (
         "IndexReport(articles=1, chunks=2, total_chunks=3, version=4)"
     )
 
 
+def test_indexing_with_another_model_than_the_active_one_exits_with_2_and_says_how_to_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> index_cli.IndexReport:
+        raise ValueError("the stored vectors were built differently: model: stored 'a'")
+
+    lines: list[str] = []
+    monkeypatch.setattr(index_cli, "log_line", lines.append)
+    monkeypatch.setattr(index_cli, "load_embedder", lambda _name: StubEmbedder())
+    monkeypatch.setattr(index_cli, "index_info_for", lambda _name, _dimensions: None)
+    monkeypatch.setattr(index_cli, "run_indexing", refuse)
+    assert index_cli.main([]) == 2
+    assert lines[-1] == "chunks: the stored vectors were built differently: model: stored 'a'"
+
+
+def test_reembed_switches_to_the_configured_model_without_indexing_articles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    info = IndexInfo("test/model", "r", 2, "title. chunk")
+    calls: dict[str, object] = {}
+
+    def fake_reembed(store: object, embedder: object, given: object, **kwargs: object) -> None:
+        calls.update(store=store, embedder=embedder, info=given, **kwargs)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("re-embedding must not index articles")
+
+    monkeypatch.setattr(index_cli, "load_embedder", lambda _name: StubEmbedder())
+    monkeypatch.setattr(index_cli, "index_info_for", lambda _name, _dimensions: info)
+    monkeypatch.setattr(index_cli, "run_reembed", fake_reembed)
+    monkeypatch.setattr(index_cli, "run_indexing", forbidden)
+    assert index_cli.main(["--reembed", "--batch-size", "9"]) == 0
+    assert (calls["info"], calls["batch_size"]) == (info, 9)
+    assert isinstance(calls["store"], RecordingStore)
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "line"),
+    [
+        (LookupError("no version published"), 2, "reembed: no version published"),
+        (
+            VersionNotReadyError(6, "3 of 9 chunks are not in the vector index"),
+            4,
+            "reembed: version 6 is not ready to be read: 3 of 9 chunks are not in the vector "
+            "index; the active version is unchanged, run again to resume",
+        ),
+    ],
+)
+def test_a_reembed_that_cannot_finish_exits_with_a_code_and_leaves_the_active_version(
+    error: Exception, code: int, line: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    lines: list[str] = []
+    monkeypatch.setattr(index_cli, "log_line", lines.append)
+    monkeypatch.setattr(index_cli, "load_embedder", lambda _name: StubEmbedder())
+    monkeypatch.setattr(index_cli, "index_info_for", lambda _name, _dimensions: None)
+    monkeypatch.setattr(index_cli, "run_reembed", refuse)
+    assert index_cli.main(["--reembed"]) == code
+    assert lines[-1] == line
+
+
+def test_reembed_cannot_be_combined_with_rollback_or_gc() -> None:
+    for other in ("--rollback", "--gc"):
+        with pytest.raises(SystemExit):
+            index_cli.main(["--reembed", other])
+
+
 def test_gc_is_a_dry_run_that_does_not_load_the_embedding_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def forbidden() -> None:
+    def forbidden(_name: str) -> None:
         raise AssertionError("collecting garbage must not load the embedding model")
 
-    monkeypatch.setattr(index_cli, "load_default_embedder", forbidden)
+    monkeypatch.setattr(index_cli, "load_embedder", forbidden)
     assert index_cli.main(["--gc"]) == 0
     assert RecordingStore.opened == [("bolt://db", "neo", "secret")]
     assert RecordingStore.gc_calls == [(3, 0, False)]

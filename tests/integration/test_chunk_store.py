@@ -655,7 +655,7 @@ def test_a_failed_rollback_changes_nothing(
     store.publish_version()
     store.upsert_chunks([indexed(1, 0, "second", 8)], {"9999.00001": "h2"})
     current = store.publish_version()
-    monkeypatch.setattr("graphrag.adapters.neo4j_store.RESTORE_ARTICLE_KEYS", "NOT CYPHER")
+    monkeypatch.setattr("graphrag.adapters.neo4j_store._restore_article_keys", lambda: "NOT CYPHER")
     with pytest.raises(neo4j.exceptions.Neo4jError):
         store.rollback()
     assert store.current_version() == current  # the pointer move was rolled back

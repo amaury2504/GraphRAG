@@ -45,7 +45,8 @@
       "contenu": "embedding_model et version sur chaque vecteur, nouvel index construit en parallèle, bascule atomique",
       "type": "code",
       "source": "docs/backlog.md",
-      "etat": "a-faire",
+      "etat": "fait",
+      "pr": 11,
       "branche": "agent/t5",
       "worktree": "../GraphRAG-wt/t5"
     },

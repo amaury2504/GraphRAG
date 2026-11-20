@@ -19,7 +19,9 @@ from graphrag.domain.models import (
     WorkRecord,
 )
 from graphrag.domain.versioning import (
+    LEGACY_SLOT,
     GcReport,
+    VectorSlot,
     VersionInfo,
     VersionNotReadyError,
     VersionStatus,
@@ -112,7 +114,7 @@ MERGE (s)-[:CITES]->(t)
 """
 
 
-VECTOR_INDEX = "chunk_embedding"
+VECTOR_INDEX = LEGACY_SLOT.index
 FULLTEXT_INDEX = "chunk_text"
 
 INDEX_INFO_CONSTRAINT = (
@@ -123,11 +125,11 @@ CHUNK_KEY_CONSTRAINT = (
 )
 
 
-def create_vector_index(dimensions: int) -> str:
-    """Schema commands take the size as a literal; callers pass a checked int."""
+def create_vector_index(dimensions: int, slot: VectorSlot = LEGACY_SLOT) -> str:
+    """Schema commands take the size and names as literals; callers pass checked values."""
     return f"""
-CREATE VECTOR INDEX {VECTOR_INDEX} IF NOT EXISTS
-FOR (c:Chunk) ON c.embedding
+CREATE VECTOR INDEX {slot.index} IF NOT EXISTS
+FOR (c:Chunk) ON c.{slot.property}
 OPTIONS {{indexConfig: {{
   `vector.dimensions`: {dimensions},
   `vector.similarity_function`: 'cosine'
@@ -164,19 +166,47 @@ MATCH (a:Article)
 RETURN a, a.indexed_hash AS indexed_hash ORDER BY a.arxiv_id
 """
 
-# A chunk is immutable: if its key exists (same article, position and text) nothing changes.
-UPSERT_CHUNKS = """
+
+# A chunk is immutable: if its key exists (same article, position and text) nothing changes,
+# except that the vector of a model it has none for yet is added (never replaced).
+def upsert_chunks_query(slot: VectorSlot) -> str:
+    return f"""
 UNWIND $rows AS row
-MATCH (a:Article {arxiv_id: row.arxiv_id})
-MERGE (c:Chunk {key: row.key})
+MATCH (a:Article {{arxiv_id: row.arxiv_id}})
+MERGE (c:Chunk {{key: row.key}})
 ON CREATE SET c.arxiv_id = row.arxiv_id,
               c.position = row.position,
               c.text = row.text,
-              c.search_text = row.search_text,
-              c.embedding = row.embedding
+              c.search_text = row.search_text
+SET c.{slot.property} = coalesce(c.{slot.property}, row.embedding)
 WITH c, a
 MERGE (c)-[:PART_OF]->(a)
 """
+
+
+# Extra condition ("AND ...") on the articles whose chunks a version, a re-embedding or a
+# rollback looks at; tests use it to stay on their own data, it is empty in production.
+ARTICLE_SCOPE = ""
+
+
+def chunks_missing_vector_query(slot: VectorSlot) -> str:
+    """The chunks the articles contribute to the next version that hold no vector in `slot`."""
+    return f"""
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL {ARTICLE_SCOPE}
+UNWIND a.indexed_keys AS key
+MATCH (c:Chunk {{key: key}}) WHERE c.{slot.property} IS NULL
+RETURN DISTINCT c.key AS key, c.search_text AS text
+LIMIT $limit
+"""
+
+
+def set_chunk_vectors_query(slot: VectorSlot) -> str:
+    return f"""
+UNWIND $rows AS row
+MATCH (c:Chunk {{key: row.key}}) WHERE c.{slot.property} IS NULL
+SET c.{slot.property} = row.embedding
+"""
+
 
 # `articles` rows: {arxiv_id, hash, keys}, with `keys` the keys of the chunks the article owns.
 # `indexed_keys` is what the article contributes to the next version.
@@ -216,18 +246,22 @@ CREATE_VERSION = """
 OPTIONAL MATCH (:Current {name: $name})-[:POINTS_TO]->(previous:Version)
 CALL { MATCH (v:Version) RETURN coalesce(max(v.id), 0) + 1 AS next }
 CREATE (version:Version {id: next, created_at: datetime(), chunk_count: 0, status: 'pending'})
+SET version += $fingerprint
 FOREACH (_ IN CASE WHEN previous IS NULL THEN [] ELSE [1] END |
          CREATE (version)-[:PREVIOUS]->(previous))
 RETURN version.id AS id
 """
 
-FILL_MANIFEST = """
-MATCH (version:Version {id: $id})
-MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
+
+def _fill_manifest() -> str:
+    return f"""
+MATCH (version:Version {{id: $id}})
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL {ARTICLE_SCOPE}
 UNWIND a.indexed_keys AS key
-MATCH (c:Chunk {key: key})
+MATCH (c:Chunk {{key: key}})
 MERGE (version)-[:CONTAINS]->(c)
 """
+
 
 COUNT_MANIFEST = """
 MATCH (version:Version {id: $id})
@@ -235,7 +269,7 @@ OPTIONAL MATCH (version)-[:CONTAINS]->(c:Chunk)
 WITH version, count(c) AS n
 SET version.chunk_count = n
 RETURN version.id AS id, version.created_at AS created_at, n AS chunk_count,
-       version.status AS status
+       version.status AS status, version.model AS model
 """
 
 # The version is readable once the chunks of its manifest are in both indexes: the indexes
@@ -246,14 +280,17 @@ SHOW INDEXES YIELD name, state WHERE name IN [$vector_index, $text_index]
 RETURN name, state
 """
 
-MANIFEST_COVERAGE = """
-MATCH (version:Version {id: $id})
+
+def _manifest_coverage(slot: VectorSlot) -> str:
+    return f"""
+MATCH (version:Version {{id: $id}})
 OPTIONAL MATCH (version)-[:CONTAINS]->(c:Chunk)
 RETURN count(c) AS chunks,
-       count(CASE WHEN c.embedding IS NOT NULL AND size(c.embedding) = $dimensions
+       count(CASE WHEN c.{slot.property} IS NOT NULL AND size(c.{slot.property}) = $dimensions
                   THEN 1 END) AS with_vector,
        count(CASE WHEN c.search_text IS NOT NULL THEN 1 END) AS with_text
 """
+
 
 MARK_VERSION_INDEXED = "MATCH (v:Version {id: $id}) SET v.status = 'indexed'"
 
@@ -274,7 +311,17 @@ CREATE (current)-[:POINTS_TO]->(version)
 CURRENT_VERSION = """
 MATCH (:Current {name: $name})-[:POINTS_TO]->(v:Version)
 RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count,
-       coalesce(v.status, 'active') AS status
+       coalesce(v.status, 'active') AS status, v.model AS model
+"""
+
+# What the active version was built with. A version made before models were versioned has no
+# fingerprint: it was built with the model recorded in the `IndexInfo` node, into the legacy slot.
+ACTIVE_FINGERPRINT = """
+MATCH (:Current {name: $name})-[:POINTS_TO]->(v:Version)
+RETURN v.model AS model, v.revision AS revision, v.dimensions AS dimensions,
+       v.text_template AS text_template,
+       coalesce(v.vector_property, $legacy_property) AS vector_property,
+       coalesce(v.vector_index, $legacy_index) AS vector_index
 """
 
 # Only an indexed version can be rolled back to: a pending one is not complete.
@@ -282,17 +329,20 @@ PREVIOUS_VERSION = """
 MATCH (:Current {name: $name})-[:POINTS_TO]->(:Version)-[:PREVIOUS]->(v:Version)
 WHERE v.status = 'indexed'
 RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count,
-       v.status AS status
+       v.status AS status, v.model AS model
 """
 
-# After a rollback each article contributes to the next version the chunks that the version
-# rolled back to contains (none if it holds none of the article's).
-RESTORE_ARTICLE_KEYS = """
-MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
-OPTIONAL MATCH (:Version {id: $id})-[:CONTAINS]->(c:Chunk)-[:PART_OF]->(a)
+
+def _restore_article_keys() -> str:
+    """After a rollback each article contributes to the next version the chunks that the version
+    rolled back to contains (none if it holds none of the article's)."""
+    return f"""
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL {ARTICLE_SCOPE}
+OPTIONAL MATCH (:Version {{id: $id}})-[:CONTAINS]->(c:Chunk)-[:PART_OF]->(a)
 WITH a, [key IN collect(c.key) WHERE key IS NOT NULL] AS keys
 SET a.indexed_keys = keys
 """
+
 
 # Garbage collection. The scopes are extra conditions ("AND ...") that tests use to restrict
 # the collection to their own data; they are empty in production.
@@ -302,8 +352,16 @@ GC_BATCH = 1000  # chunks deleted per transaction
 
 VERSION_FIELDS = (
     "v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count, "
-    "coalesce(v.status, 'indexed') AS status"
+    "coalesce(v.status, 'indexed') AS status, v.model AS model"
 )
+
+# The vector slots the given versions are read with (the legacy one for a version without).
+VERSION_SLOTS = """
+MATCH (v:Version) WHERE v.id IN $ids
+RETURN DISTINCT coalesce(v.vector_property, $legacy_property) AS property,
+                coalesce(v.vector_index, $legacy_index) AS index
+"""
+DROP_VECTOR_INDEX = "DROP INDEX {index} IF EXISTS"
 
 # The current version, then its predecessors back to the oldest one still linked.
 CHAIN_VERSIONS = f"""
@@ -318,6 +376,17 @@ DELETE_VERSIONS = "MATCH (v:Version) WHERE v.id IN $ids DETACH DELETE v"
 
 def _all_versions() -> str:
     return f"MATCH (v:Version) WHERE true {GC_VERSION_SCOPE} RETURN {VERSION_FIELDS}"
+
+
+def _remove_vectors(slot: VectorSlot) -> str:
+    """Strip a slot's vectors from the chunks, a batch at a time (`$kept` is ignored)."""
+    return f"""
+MATCH (c:Chunk)
+WHERE c.{slot.property} IS NOT NULL {GC_CHUNK_SCOPE}
+WITH c LIMIT $batch
+REMOVE c.{slot.property}
+RETURN count(*) AS n
+"""
 
 
 def _unreferenced_chunks() -> str:
@@ -390,6 +459,7 @@ def _version(record: Any) -> VersionInfo:
         created_at=record["created_at"].to_native(),
         chunk_count=int(record["chunk_count"]),
         status=VersionStatus(record["status"]),
+        embedding_model=record["model"],
     )
 
 
@@ -508,25 +578,62 @@ class Neo4jStore:
             cites=record["cites"],
         )
 
-    def ensure_chunk_schema(self, dimensions: int) -> None:
+    def ensure_chunk_schema(self, dimensions: int, info: IndexInfo | None = None) -> None:
         if type(dimensions) is not int or dimensions < 1:
             raise ValueError(f"dimensions must be a positive integer, got {dimensions!r}")
+        slot = self._slot_for(info)
         with self._driver.session() as session:
             session.run(CHUNK_KEY_CONSTRAINT).consume()
             session.run(INDEX_INFO_CONSTRAINT).consume()
             session.run(VERSION_CONSTRAINT).consume()
             session.run(CURRENT_CONSTRAINT).consume()
-            session.run(create_vector_index(dimensions)).consume()
+            session.run(create_vector_index(dimensions, slot)).consume()
             self._ensure_fulltext_index(session)
-            record = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single()
+            record = session.run(VECTOR_INDEX_OPTIONS, name=slot.index).single()
         if record is None:
-            raise RuntimeError(f"vector index {VECTOR_INDEX} was not created")
+            raise RuntimeError(f"vector index {slot.index} was not created")
         existing = record["options"]["indexConfig"]["vector.dimensions"]
         if existing != dimensions:
             raise ValueError(
-                f"vector index {VECTOR_INDEX} has {existing} dimensions, the embedder has "
+                f"vector index {slot.index} has {existing} dimensions, the embedder has "
                 f"{dimensions}: drop the index and the chunks, then index again"
             )
+
+    def _slot_for(self, info: IndexInfo | None) -> VectorSlot:
+        """Where the vectors of `info` live: the legacy slot for the recorded model (the one that
+        built the database), a slot of its own for any other, the active one for None."""
+        if info is None:
+            return self._active_slot()
+        recorded = self.read_index_info()
+        return LEGACY_SLOT if recorded is None or recorded == info else info.slot()
+
+    def _active_slot(self) -> VectorSlot:
+        record = self._active_fingerprint()
+        if record is None:
+            return LEGACY_SLOT
+        return VectorSlot(record["vector_property"], record["vector_index"])
+
+    def _active_fingerprint(self) -> Any:
+        with self._driver.session() as session:
+            return session.run(
+                ACTIVE_FINGERPRINT,
+                name=CURRENT_NAME,
+                legacy_property=LEGACY_SLOT.property,
+                legacy_index=LEGACY_SLOT.index,
+            ).single()
+
+    def active_index_info(self) -> IndexInfo | None:
+        """What the vectors searches read were built with: the active version's model, or the
+        recorded one for a version made before models were versioned."""
+        record = self._active_fingerprint()
+        if record is None or record["model"] is None:
+            return self.read_index_info()
+        return IndexInfo(
+            model=record["model"],
+            revision=record["revision"],
+            dimensions=record["dimensions"],
+            text_template=record["text_template"],
+        )
 
     def read_index_info(self) -> IndexInfo | None:
         """What the stored vectors were built with, or None if nothing is recorded yet."""
@@ -563,8 +670,8 @@ class Neo4jStore:
         self.check_index_info(info)
 
     def check_index_info(self, info: IndexInfo) -> None:
-        """Raise unless the stored vectors were built with `info` (use before searching)."""
-        stored = self.read_index_info()
+        """Raise unless the active vectors were built with `info` (use before searching)."""
+        stored = self.active_index_info()
         if stored is None:
             raise ValueError("no index fingerprint is recorded: run graphrag.cli.index once")
         differences = stored.differences(info)
@@ -572,7 +679,8 @@ class Neo4jStore:
             raise ValueError(
                 "the stored vectors were built differently: "
                 + "; ".join(differences)
-                + ". Drop the chunks and index again, or use the original model"
+                + ". Set EMBEDDING_MODEL to the model of the active version, or switch with"
+                " `index --reembed`"
             )
 
     @staticmethod
@@ -602,8 +710,12 @@ class Neo4jStore:
             ]
 
     def upsert_chunks(
-        self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
+        self,
+        chunks: Sequence[IndexedChunk],
+        article_hashes: Mapping[str, str] | None = None,
+        info: IndexInfo | None = None,
     ) -> None:
+        slot = self._slot_for(info)
         rows = [
             {
                 "key": c.key,
@@ -628,7 +740,7 @@ class Neo4jStore:
 
         def write(tx: neo4j.ManagedTransaction) -> None:
             if rows:
-                tx.run(UPSERT_CHUNKS, rows=rows).consume()
+                tx.run(upsert_chunks_query(slot), rows=rows).consume()
             if articles:
                 tx.run(MARK_INDEXED, articles=articles).consume()
 
@@ -636,18 +748,34 @@ class Neo4jStore:
             # one transaction: an article is never half indexed
             session.execute_write(write)
 
-    def publish_version(self) -> VersionInfo:
+    def publish_version(self, info: IndexInfo | None = None) -> VersionInfo:
         """Build the manifest (pending), check the indexes cover it (indexed), then activate it.
 
-        The first step is one transaction, the last is another: a crash between them leaves a
-        pending or indexed version that no search reads, and the active one is unchanged.
+        The version is read with the vectors of `info` (the active model when None), and records
+        that fingerprint. The first step is one transaction, the last is another: a crash between
+        them leaves a pending or indexed version that no search reads, and the active one is
+        unchanged.
         """
+        built_with = info if info is not None else self.active_index_info()
+        slot = self._slot_for(built_with) if built_with is not None else LEGACY_SLOT
+        fingerprint: dict[str, Any] = {}
+        if built_with is not None:
+            fingerprint = {
+                "model": built_with.model,
+                "revision": built_with.revision,
+                "dimensions": built_with.dimensions,
+                "text_template": built_with.text_template,
+                "vector_property": slot.property,
+                "vector_index": slot.index,
+            }
 
         def build(tx: neo4j.ManagedTransaction) -> VersionInfo:
             tx.run(ADOPT_LEGACY_CHUNKS).consume()
             tx.run(MIGRATE_VERSION_STATUSES, name=CURRENT_NAME).consume()
-            version_id = tx.run(CREATE_VERSION, name=CURRENT_NAME).single(strict=True)["id"]
-            tx.run(FILL_MANIFEST, id=version_id).consume()
+            version_id = tx.run(CREATE_VERSION, name=CURRENT_NAME, fingerprint=fingerprint).single(
+                strict=True
+            )["id"]
+            tx.run(_fill_manifest(), id=version_id).consume()
             return _version(tx.run(COUNT_MANIFEST, id=version_id).single(strict=True))
 
         def activate(tx: neo4j.ManagedTransaction, version_id: int) -> None:
@@ -655,30 +783,30 @@ class Neo4jStore:
 
         with self._driver.session() as session:
             pending = session.execute_write(build)
-            self._verify_indexed(session, pending)
+            self._verify_indexed(session, pending, slot)
             session.run(MARK_VERSION_INDEXED, id=pending.id).consume()
             session.execute_write(activate, pending.id)
         return replace(pending, status=VersionStatus.ACTIVE)
 
     @staticmethod
-    def _verify_indexed(session: neo4j.Session, version: VersionInfo) -> None:
+    def _verify_indexed(session: neo4j.Session, version: VersionInfo, slot: VectorSlot) -> None:
         """Wait for both indexes, then raise unless they cover every chunk of the version."""
-        for index in (VECTOR_INDEX, FULLTEXT_INDEX):
+        for index in (slot.index, FULLTEXT_INDEX):
             session.run(AWAIT_INDEX, name=index, seconds=INDEX_BUILD_SECONDS).consume()
         states = {
             r["name"]: r["state"]
-            for r in session.run(INDEX_STATES, vector_index=VECTOR_INDEX, text_index=FULLTEXT_INDEX)
+            for r in session.run(INDEX_STATES, vector_index=slot.index, text_index=FULLTEXT_INDEX)
         }
         problems = [
             f"index {name} is {states[name]}" if name in states else f"index {name} does not exist"
-            for name in (VECTOR_INDEX, FULLTEXT_INDEX)
+            for name in (slot.index, FULLTEXT_INDEX)
             if states.get(name) != "ONLINE"
         ]
         if problems:
             raise VersionNotReadyError(version.id, "; ".join(problems))
-        options = session.run(VECTOR_INDEX_OPTIONS, name=VECTOR_INDEX).single(strict=True)
+        options = session.run(VECTOR_INDEX_OPTIONS, name=slot.index).single(strict=True)
         coverage = session.run(
-            MANIFEST_COVERAGE,
+            _manifest_coverage(slot),
             id=version.id,
             dimensions=options["options"]["indexConfig"]["vector.dimensions"],
         ).single(strict=True)
@@ -701,7 +829,7 @@ class Neo4jStore:
             if previous is None:
                 raise LookupError("no earlier version to roll back to")
             tx.run(POINT_TO_VERSION, name=CURRENT_NAME, id=previous["id"]).consume()
-            tx.run(RESTORE_ARTICLE_KEYS, id=previous["id"]).consume()
+            tx.run(_restore_article_keys(), id=previous["id"]).consume()
             return replace(_version(previous), status=VersionStatus.ACTIVE)
 
         with self._driver.session() as session:
@@ -722,9 +850,15 @@ class Neo4jStore:
                 chain, abandoned, keep=keep, min_age_days=min_age_days, now=datetime.now(UTC)
             )
             kept = list(plan.kept)
+            # Vectors only dropped versions were read with are of no use any more; a slot no
+            # version has used yet (a re-embedding in progress) is not touched.
+            unused = self._unused_slots(session, kept, list(plan.dropped))
+            names = tuple(slot.index for slot in unused)
             if not apply:
                 count = session.run(_unreferenced_chunks() + "RETURN count(c) AS n", kept=kept)
-                return GcReport(plan.kept, plan.dropped, int(count.single(strict=True)["n"]), False)
+                return GcReport(
+                    plan.kept, plan.dropped, int(count.single(strict=True)["n"]), False, names
+                )
             session.run(DELETE_VERSIONS, ids=list(plan.dropped)).consume()
             sweep = (
                 _unreferenced_chunks() + "WITH c LIMIT $batch DETACH DELETE c RETURN count(*) AS n"
@@ -732,7 +866,27 @@ class Neo4jStore:
             deleted = 0
             while batch := self._sweep_batch(session, sweep, kept):
                 deleted += batch
-            return GcReport(plan.kept, plan.dropped, deleted, True)
+            for slot in unused:
+                session.run(DROP_VECTOR_INDEX.format(index=slot.index)).consume()
+                strip = _remove_vectors(slot)
+                while self._sweep_batch(session, strip, kept):
+                    pass
+            return GcReport(plan.kept, plan.dropped, deleted, True, names)
+
+    @staticmethod
+    def _unused_slots(
+        session: neo4j.Session, kept: list[int], dropped: list[int]
+    ) -> list[VectorSlot]:
+        def slots(ids: list[int]) -> set[VectorSlot]:
+            result = session.run(
+                VERSION_SLOTS,
+                ids=ids,
+                legacy_property=LEGACY_SLOT.property,
+                legacy_index=LEGACY_SLOT.index,
+            )
+            return {VectorSlot(r["property"], r["index"]) for r in result}
+
+        return sorted(slots(dropped) - slots(kept), key=lambda slot: slot.index)
 
     @staticmethod
     def _sweep_batch(session: neo4j.Session, sweep: str, kept: list[int]) -> int:
@@ -742,11 +896,31 @@ class Neo4jStore:
 
         return session.execute_write(write)
 
+    def chunks_missing_vector(self, info: IndexInfo, limit: int) -> list[tuple[str, str]]:
+        """Up to `limit` (key, search text) of the chunks the next version holds that have no
+        vector of the model `info` yet."""
+        query = chunks_missing_vector_query(self._slot_for(info))
+        with self._driver.session() as session:
+            return [(r["key"], r["text"]) for r in session.run(query, limit=limit)]
+
+    def set_chunk_vectors(self, info: IndexInfo, vectors: Mapping[str, Sequence[float]]) -> None:
+        """Add the vectors of the model `info` to chunks that have none (never replaces one)."""
+        rows = [{"key": key, "embedding": list(v)} for key, v in vectors.items()]
+        if not rows:
+            return
+        query = set_chunk_vectors_query(self._slot_for(info))
+
+        def write(tx: neo4j.ManagedTransaction) -> None:
+            tx.run(query, rows=rows).consume()
+
+        with self._driver.session() as session:
+            session.execute_write(write)
+
     def vector_search(self, vector: Sequence[float], k: int) -> list[SearchHit]:
         with self._driver.session() as session:
             result = session.run(
                 VECTOR_SEARCH,
-                index=VECTOR_INDEX,
+                index=self._active_slot().index,
                 name=CURRENT_NAME,
                 candidates=k * FILTER_OVERSAMPLE,
                 k=k,

@@ -21,6 +21,18 @@ def chunk_key(arxiv_id: str, position: int, search_text: str) -> str:
     return f"{arxiv_id}#{position}#{hashlib.sha256(payload).hexdigest()[:KEY_DIGEST_LENGTH]}"
 
 
+@dataclass(frozen=True, slots=True)
+class VectorSlot:
+    """Where the vectors of one embedding model live: a chunk property and the index over it."""
+
+    property: str
+    index: str
+
+
+# The slot of the model that built the database before models were versioned.
+LEGACY_SLOT = VectorSlot("embedding", "chunk_embedding")
+
+
 class VersionStatus(StrEnum):
     """Where a version is on its way to being read.
 
@@ -38,12 +50,15 @@ class VersionInfo:
     """A snapshot of the index: its number, when it was made, how many chunks it holds.
 
     The status defaults to `active`, the one a published or current version has.
+    `embedding_model` names the model whose vectors the version is read with (None for a version
+    made before models were versioned).
     """
 
     id: int
     created_at: datetime
     chunk_count: int
     status: VersionStatus = VersionStatus.ACTIVE
+    embedding_model: str | None = None
 
 
 class VersionNotReadyError(RuntimeError):
@@ -81,6 +96,8 @@ class GcReport:
     dropped_versions: tuple[int, ...]
     unreferenced_chunks: int
     applied: bool
+    # vector indexes only dropped versions used (the vectors go with them)
+    dropped_vector_indexes: tuple[str, ...] = ()
 
 
 def plan_retention(

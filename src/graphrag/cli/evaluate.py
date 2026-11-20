@@ -18,8 +18,8 @@ from graphrag.adapters.question_file import DEFAULT_PATH, read_questions
 from graphrag.adapters.sentence_transformer import (
     MODEL_NAME,
     MODEL_REVISION,
-    default_index_info,
-    load_default_embedder,
+    index_info_for,
+    load_embedder,
 )
 from graphrag.domain.evaluation import SPLITS, EvalQuestion, Summary, split_of
 from graphrag.pipeline.evaluation import (
@@ -129,7 +129,9 @@ def build_report(
     include_unvalidated: bool,
     now: datetime,
     split: str | None = None,
+    embedding: tuple[str, str] = (MODEL_NAME, MODEL_REVISION),
 ) -> dict[str, Any]:
+    """`embedding` is the (model, revision) the vectors searched were built with."""
     names = list(results)
     configs: dict[str, Any] = {}
     for name in names:
@@ -161,8 +163,8 @@ def build_report(
         "questions": len(questions),
         "ks": list(ks),
         "settings": {
-            "embedding_model": MODEL_NAME,
-            "embedding_revision": MODEL_REVISION,
+            "embedding_model": embedding[0],
+            "embedding_revision": embedding[1],
             "rrf_k": RRF_K,
             "candidates_per_search": CANDIDATES,
         },
@@ -231,11 +233,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("No validated question to evaluate (use --include-unvalidated for a trial run).")
         return 1
     settings = Settings()  # type: ignore[call-arg]  # values come from the environment
-    embedder = load_default_embedder()
+    embedder = load_embedder(settings.embedding_model)
+    info = index_info_for(settings.embedding_model, embedder.dimensions)
     with Neo4jStore(
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     ) as store:
-        store.check_index_info(default_index_info(embedder.dimensions))
+        store.check_index_info(info)
         retrievers: dict[str, Retriever] = {
             "vector": VectorRetriever(store, embedder),
             "hybrid": HybridRetriever(store, embedder),
@@ -257,6 +260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         include_unvalidated=args.include_unvalidated,
         now=now,
         split=args.split,
+        embedding=(info.model, info.revision),
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     path = args.output_dir / f"retrieval_{now:%Y%m%d_%H%M%S}.json"

@@ -6,15 +6,30 @@ from graphrag.domain.versioning import GcReport, VersionInfo
 
 
 class ChunkStore(Protocol):
-    def ensure_chunk_schema(self, dimensions: int) -> None:
+    def ensure_chunk_schema(self, dimensions: int, info: IndexInfo | None = None) -> None:
         """Create the chunk key constraint, the vector index and the full-text index.
 
-        Fails if a vector index already exists with another number of dimensions.
+        The vector index is the one of the model `info` (of the active model when None): each
+        model has its own, built beside the others. Fails if it already exists with another
+        number of dimensions.
         """
         ...
 
     def ensure_index_info(self, info: IndexInfo) -> None:
-        """Record what the vectors are built with, or fail if another model/template is recorded."""
+        """Record what the vectors are built with, or fail if the active vectors differ."""
+        ...
+
+    def active_index_info(self) -> IndexInfo | None:
+        """What the vectors searches read were built with (None if nothing is recorded)."""
+        ...
+
+    def chunks_missing_vector(self, info: IndexInfo, limit: int) -> list[tuple[str, str]]:
+        """Up to `limit` (key, search text) of the chunks the next version holds that have no
+        vector of the model `info` yet."""
+        ...
+
+    def set_chunk_vectors(self, info: IndexInfo, vectors: Mapping[str, Sequence[float]]) -> None:
+        """Add the vectors of the model `info` to chunks that have none (never replaces one)."""
         ...
 
     def articles_with_index_state(self) -> list[ArticleIndexState]:
@@ -22,7 +37,10 @@ class ChunkStore(Protocol):
         ...
 
     def upsert_chunks(
-        self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
+        self,
+        chunks: Sequence[IndexedChunk],
+        article_hashes: Mapping[str, str] | None = None,
+        info: IndexInfo | None = None,
     ) -> None:
         """Write the chunks and their PART_OF relations in one transaction. Idempotent.
 
@@ -32,19 +50,24 @@ class ChunkStore(Protocol):
         records, in the same transaction, which of `chunks` are its own and the hash it was
         indexed from. An article with no chunk in `chunks` is thereby emptied.
 
+        The vectors are those of the model `info` (the active one when None); a chunk that exists
+        without a vector of that model gains it, one that has it keeps it.
+
         Written chunks are not readable until `publish_version` puts them in a version.
         """
         ...
 
-    def publish_version(self) -> VersionInfo:
+    def publish_version(self, info: IndexInfo | None = None) -> VersionInfo:
         """Snapshot the chunks of every indexed article as a new version and make it current.
 
         The version is `pending` while its manifest is built, `indexed` once every chunk of the
         manifest is in the vector and the full-text index, and `active` once the "current
         version" pointer moves to it (the version it replaces becomes `indexed` again). The
         pointer move is one transaction: a reader sees the old version or the new one, never a
-        mix. Raises VersionNotReadyError, leaving the active version as it was, if an index is
-        not online or does not hold every chunk.
+        mix. The version is read with the vectors of the model `info` (the active one when None),
+        so publishing with a new model switches to it and a rollback switches back. Raises
+        VersionNotReadyError, leaving the active version as it was, if an index is not online
+        or does not hold every chunk.
         """
         ...
 

@@ -3,7 +3,14 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from graphrag.cli.index import _parse_args, index_articles, run_gc, run_indexing, run_rollback
+from graphrag.cli.index import (
+    _parse_args,
+    index_articles,
+    run_gc,
+    run_indexing,
+    run_reembed,
+    run_rollback,
+)
 from graphrag.domain.hashing import article_hash
 from graphrag.domain.models import Article, ArticleIndexState, IndexedChunk, IndexInfo
 from graphrag.domain.versioning import GcReport, VersionInfo, VersionNotReadyError
@@ -38,23 +45,47 @@ class FakeChunkStore:
         self.manifests: list[frozenset[str]] = []
         self.current: int | None = None  # index into `manifests`
         self.schema_dimensions: list[int] = []
+        self.schema_infos: list[IndexInfo | None] = []
         self.writes: list[list[str]] = []
         self.fail_on_write = fail_on_write
+        self.active: IndexInfo | None = None  # the model the current version is read with
+        self.write_infos: list[IndexInfo | None] = []
+        self.published_with: list[IndexInfo | None] = []
+        self.vectors: dict[IndexInfo, dict[str, list[float]]] = {}  # per model, by chunk key
+        self.refuse_publication = False
 
-    def ensure_chunk_schema(self, dimensions: int) -> None:
+    def ensure_chunk_schema(self, dimensions: int, info: IndexInfo | None = None) -> None:
         self.schema_dimensions.append(dimensions)
+        self.schema_infos.append(info)
 
     def ensure_index_info(self, info: IndexInfo) -> None:
         self.infos = [*getattr(self, "infos", []), info]
+
+    def active_index_info(self) -> IndexInfo | None:
+        return self.active
+
+    def chunks_missing_vector(self, info: IndexInfo, limit: int) -> list[tuple[str, str]]:
+        have = self.vectors.get(info, {})
+        keys = sorted(frozenset().union(*self.article_keys.values()) - have.keys())
+        return [(key, self.chunks[key].search_text) for key in keys[:limit]]
+
+    def set_chunk_vectors(self, info: IndexInfo, vectors: Mapping[str, Sequence[float]]) -> None:
+        stored = self.vectors.setdefault(info, {})
+        for key, vector in vectors.items():
+            stored.setdefault(key, list(vector))  # a vector is never replaced
 
     def articles_with_index_state(self) -> list[ArticleIndexState]:
         return [ArticleIndexState(a, self.hashes.get(a.arxiv_id)) for a in self.articles]
 
     def upsert_chunks(
-        self, chunks: Sequence[IndexedChunk], article_hashes: Mapping[str, str] | None = None
+        self,
+        chunks: Sequence[IndexedChunk],
+        article_hashes: Mapping[str, str] | None = None,
+        info: IndexInfo | None = None,
     ) -> None:
         if self.fail_on_write is not None and len(self.writes) == self.fail_on_write:
             raise RuntimeError("neo4j went away")
+        self.write_infos.append(info)
         owners = article_hashes or {}
         self.writes.append(sorted(owners or {c.chunk.arxiv_id for c in chunks}))
         self.chunks.update({c.key: c for c in chunks if c.key not in self.chunks})  # immutable
@@ -64,7 +95,12 @@ class FakeChunkStore:
             }
         self.hashes.update(owners)
 
-    def publish_version(self) -> VersionInfo:
+    def publish_version(self, info: IndexInfo | None = None) -> VersionInfo:
+        if self.refuse_publication:
+            raise VersionNotReadyError(len(self.manifests) + 1, "chunks are not in the index")
+        self.published_with.append(info)
+        if info is not None:
+            self.active = info
         self.manifests.append(frozenset().union(*self.article_keys.values()))
         self.current = len(self.manifests) - 1
         return self._info(self.current)
@@ -323,7 +359,7 @@ def test_the_log_announces_the_published_version() -> None:
 
 def test_a_version_the_indexes_do_not_cover_stops_the_run_and_publishes_nothing() -> None:
     class Uncovered(FakeChunkStore):
-        def publish_version(self) -> VersionInfo:
+        def publish_version(self, info: IndexInfo | None = None) -> VersionInfo:
             raise VersionNotReadyError(1, "1 of 1 chunks are not in the vector index")
 
     lines: list[str] = []
@@ -415,3 +451,109 @@ def test_a_collection_with_nothing_to_remove_says_so() -> None:
     lines: list[str] = []
     run_gc(store, keep=3, min_age_days=0, apply=True, log=lines.append)
     assert lines[-1] == "gc: nothing to remove"
+
+
+def test_a_collection_that_only_drops_a_vector_index_names_it() -> None:
+    store = Collecting(GcReport((2, 1), (), 0, applied=True, dropped_vector_indexes=("idx_a",)))
+    lines: list[str] = []
+    run_gc(store, keep=3, min_age_days=0, apply=True, log=lines.append)
+    assert lines[-1] == "gc: dropped 0 versions () and 0 chunks, and the vector index idx_a"
+
+
+def test_a_collection_that_drops_several_vector_indexes_says_so() -> None:
+    report = GcReport((3, 2), (1,), 4, applied=False, dropped_vector_indexes=("a", "b"))
+    lines: list[str] = []
+    run_gc(Collecting(report), keep=2, min_age_days=0, apply=False, log=lines.append)
+    assert lines[-1] == (
+        "gc: would drop 1 version (1) and 4 chunks, and the vector indexes a, b, "
+        "rerun with --apply to delete"
+    )
+
+
+OLD = IndexInfo("old", "r1", 2, "title. chunk")
+NEW = IndexInfo("new", "r1", 2, "title. chunk")
+
+
+class NewEmbedder(FakeEmbedder):
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[-float(len(t)), 0.5] for t in texts]
+
+
+def published_with_old_model(abstracts: int = 5) -> FakeChunkStore:
+    store = FakeChunkStore([article(n) for n in range(1, abstracts + 1)])
+    run_indexing(store, FakeEmbedder(), log=quiet, info=OLD)
+    store.active = OLD
+    return store
+
+
+def test_reembedding_embeds_the_search_text_of_every_chunk_in_batches_then_switches() -> None:
+    store = published_with_old_model()
+    embedder = NewEmbedder()
+    lines: list[str] = []
+    version = run_reembed(store, embedder, NEW, batch_size=2, log=lines.append)
+    assert [len(call) for call in embedder.calls] == [2, 2, 1]
+    assert {text for call in embedder.calls for text in call} == {
+        c.search_text for c in store.chunks.values()
+    }
+    assert store.schema_infos[-1] == NEW  # the vector index of the new model is created first
+    assert store.published_with[-1] == NEW
+    assert store.active == NEW
+    assert version is not None
+    assert version.id == 2
+    assert lines[0] == "reembed: 2 chunks embedded with new"
+    assert lines[-2:] == [
+        "reembed: 5 chunks embedded with new",
+        "reembed: version 2 published with new (5 chunks, active)",
+    ]
+
+
+def test_the_old_vectors_are_not_touched_while_the_new_ones_are_built() -> None:
+    store = published_with_old_model(2)
+    store.vectors[OLD] = {key: [9.0, 9.0] for key in store.chunks}
+    run_reembed(store, NewEmbedder(), NEW, log=quiet)
+    assert all(v == [9.0, 9.0] for v in store.vectors[OLD].values())
+    assert set(store.vectors[NEW]) == set(store.chunks)
+
+
+def test_reembedding_with_the_active_model_does_nothing() -> None:
+    store = published_with_old_model(2)
+    embedder = NewEmbedder()
+    lines: list[str] = []
+    assert run_reembed(store, embedder, OLD, log=lines.append) is None
+    assert embedder.calls == []
+    assert store.published_with == [OLD]  # only the first publication
+    assert lines == ["reembed: the active version already uses old"]
+
+
+def test_reembedding_without_a_published_version_is_refused() -> None:
+    store = FakeChunkStore([article(1)])
+    with pytest.raises(LookupError, match="no version published yet"):
+        run_reembed(store, NewEmbedder(), NEW, log=quiet)
+
+
+def test_a_rerun_embeds_only_the_chunks_still_without_a_vector() -> None:
+    store = published_with_old_model(3)
+    first_key = sorted(store.chunks)[0]
+    store.vectors[NEW] = {first_key: [1.0, 1.0]}  # a previous run stopped after one chunk
+    embedder = NewEmbedder()
+    run_reembed(store, embedder, NEW, log=quiet)
+    assert sum(len(call) for call in embedder.calls) == 2
+    assert store.vectors[NEW][first_key] == [1.0, 1.0]  # never replaced
+
+
+def test_a_version_the_indexes_do_not_cover_leaves_the_active_model_alone() -> None:
+    store = published_with_old_model(2)
+    store.refuse_publication = True
+    with pytest.raises(VersionNotReadyError):
+        run_reembed(store, NewEmbedder(), NEW, log=quiet)
+    assert store.active == OLD
+
+
+def test_indexing_passes_the_model_to_every_step_that_depends_on_it() -> None:
+    store = FakeChunkStore([article(1), article(2)])
+    run_indexing(store, FakeEmbedder(), batch_size=1, log=quiet, info=NEW)
+    assert store.schema_infos == [NEW]
+    assert store.write_infos == [NEW, NEW]
+    assert store.published_with == [NEW]
+    assert store.infos == [NEW]

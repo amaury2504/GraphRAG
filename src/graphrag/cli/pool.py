@@ -16,7 +16,7 @@ from typing import Any
 
 from graphrag.adapters.neo4j_store import Neo4jStore
 from graphrag.adapters.question_file import DEFAULT_PATH, read_questions, write_records
-from graphrag.adapters.sentence_transformer import default_index_info, load_default_embedder
+from graphrag.adapters.sentence_transformer import index_info_for, load_embedder
 from graphrag.domain.evaluation import parse_question
 from graphrag.pipeline.pooling import POOL_DEPTH, apply_judgements, build_pool, review_record
 from graphrag.pipeline.retrieval import HybridRetriever, VectorRetriever
@@ -82,11 +82,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("No validated question to pool.")
         return 1
     settings = Settings()  # type: ignore[call-arg]  # values come from the environment
-    embedder = load_default_embedder()
+    embedder = load_embedder(settings.embedding_model)
     with Neo4jStore(
         settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password.get_secret_value()
     ) as store:
-        store.check_index_info(default_index_info(embedder.dimensions))
+        store.check_index_info(index_info_for(settings.embedding_model, embedder.dimensions))
         retrievers: dict[str, Retriever] = {
             "vector": VectorRetriever(store, embedder),
             "hybrid": HybridRetriever(store, embedder),
