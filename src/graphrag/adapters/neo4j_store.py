@@ -184,15 +184,10 @@ MERGE (c)-[:PART_OF]->(a)
 """
 
 
-# Extra condition ("AND ...") on the articles whose chunks a version, a re-embedding or a
-# rollback looks at; tests use it to stay on their own data, it is empty in production.
-ARTICLE_SCOPE = ""
-
-
 def chunks_missing_vector_query(slot: VectorSlot) -> str:
     """The chunks the articles contribute to the next version that hold no vector in `slot`."""
     return f"""
-MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL {ARTICLE_SCOPE}
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
 UNWIND a.indexed_keys AS key
 MATCH (c:Chunk {{key: key}}) WHERE c.{slot.property} IS NULL
 RETURN DISTINCT c.key AS key, c.search_text AS text
@@ -254,11 +249,11 @@ RETURN version.id AS id
 
 
 def _fill_manifest() -> str:
-    return f"""
-MATCH (version:Version {{id: $id}})
-MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL {ARTICLE_SCOPE}
+    return """
+MATCH (version:Version {id: $id})
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
 UNWIND a.indexed_keys AS key
-MATCH (c:Chunk {{key: key}})
+MATCH (c:Chunk {key: key})
 MERGE (version)-[:CONTAINS]->(c)
 """
 
@@ -336,18 +331,15 @@ RETURN v.id AS id, v.created_at AS created_at, v.chunk_count AS chunk_count,
 def _restore_article_keys() -> str:
     """After a rollback each article contributes to the next version the chunks that the version
     rolled back to contains (none if it holds none of the article's)."""
-    return f"""
-MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL {ARTICLE_SCOPE}
-OPTIONAL MATCH (:Version {{id: $id}})-[:CONTAINS]->(c:Chunk)-[:PART_OF]->(a)
+    return """
+MATCH (a:Article) WHERE a.indexed_keys IS NOT NULL
+OPTIONAL MATCH (:Version {id: $id})-[:CONTAINS]->(c:Chunk)-[:PART_OF]->(a)
 WITH a, [key IN collect(c.key) WHERE key IS NOT NULL] AS keys
 SET a.indexed_keys = keys
 """
 
 
-# Garbage collection. The scopes are extra conditions ("AND ...") that tests use to restrict
-# the collection to their own data; they are empty in production.
-GC_CHUNK_SCOPE = ""
-GC_VERSION_SCOPE = ""
+# Garbage collection.
 GC_BATCH = 1000  # chunks deleted per transaction
 
 VERSION_FIELDS = (
@@ -375,14 +367,14 @@ DELETE_VERSIONS = "MATCH (v:Version) WHERE v.id IN $ids DETACH DELETE v"
 
 
 def _all_versions() -> str:
-    return f"MATCH (v:Version) WHERE true {GC_VERSION_SCOPE} RETURN {VERSION_FIELDS}"
+    return f"MATCH (v:Version) RETURN {VERSION_FIELDS}"
 
 
 def _remove_vectors(slot: VectorSlot) -> str:
     """Strip a slot's vectors from the chunks, a batch at a time (`$kept` is ignored)."""
     return f"""
 MATCH (c:Chunk)
-WHERE c.{slot.property} IS NOT NULL {GC_CHUNK_SCOPE}
+WHERE c.{slot.property} IS NOT NULL
 WITH c LIMIT $batch
 REMOVE c.{slot.property}
 RETURN count(*) AS n
@@ -394,11 +386,10 @@ def _unreferenced_chunks() -> str:
 
     The second condition keeps what an indexing run wrote but has not published yet.
     """
-    return f"""
+    return """
 MATCH (c:Chunk)
-WHERE true {GC_CHUNK_SCOPE}
-  AND NOT EXISTS {{ MATCH (v:Version)-[:CONTAINS]->(c) WHERE v.id IN $kept }}
-  AND NOT EXISTS {{ MATCH (c)-[:PART_OF]->(a:Article) WHERE c.key IN a.indexed_keys }}
+WHERE NOT EXISTS { MATCH (v:Version)-[:CONTAINS]->(c) WHERE v.id IN $kept }
+  AND NOT EXISTS { MATCH (c)-[:PART_OF]->(a:Article) WHERE c.key IN a.indexed_keys }
 """
 
 

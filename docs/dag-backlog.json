@@ -74,7 +74,7 @@
       "contenu": "Service neo4j-test vide dans compose.yaml (autre port, volume éphémère) visé par NEO4J_URI pour les tests ; commande documentée ; retirer les périmètres 9999.* devenus inutiles ; routine : en local, seulement les fichiers d'intégration concernés",
       "type": "code",
       "source": "docs/backlog.md",
-      "etat": "a-faire",
+      "etat": "fait",
       "branche": "agent/t8",
       "worktree": "../GraphRAG-wt/t8"
     }

@@ -1,8 +1,7 @@
 """Question -> FastAPI -> hybrid search on the real Neo4j -> fake LLM -> cited answer.
 
-Only the language model and the embedder are fakes (no network, deterministic). Test articles
-use ids 9999.* and are removed afterwards; they live in the real indexes next to the corpus,
-so the assertions only concern them.
+Only the language model and the embedder are fakes (no network, deterministic). Runs on the
+throwaway database (see test_neo4j_store); test articles have ids 9999.*.
 """
 
 import hashlib

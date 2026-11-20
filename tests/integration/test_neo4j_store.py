@@ -1,7 +1,7 @@
 """Neo4j store and ingestion against the real database.
 
-Only touches nodes whose ids start with the TEST prefixes below, and removes them afterwards,
-so it is safe to run next to a real corpus.
+Run it against the throwaway database (`neo4j-test`, NEO4J_URI=bolt://localhost:7688): each
+test starts from an empty database. A database holding real articles is refused.
 """
 
 import os
@@ -37,12 +37,18 @@ def _password() -> str:
 
 
 def _cleanup() -> None:
+    """Empty the database, which must be the throwaway one (`neo4j-test`, port 7688)."""
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
-        driver.execute_query("MATCH (c:Chunk) WHERE c.arxiv_id STARTS WITH '9999.' DETACH DELETE c")
-        driver.execute_query(
-            "MATCH (a:Article) WHERE a.arxiv_id STARTS WITH '9999.' DETACH DELETE a"
+        records, _, _ = driver.execute_query(
+            "MATCH (a:Article) WHERE NOT a.arxiv_id STARTS WITH '9999.' RETURN count(a) AS n"
         )
-        driver.execute_query("MATCH (p:Author) WHERE p.key STARTS WITH 'ATEST' DETACH DELETE p")
+        if records[0]["n"]:
+            pytest.fail(
+                f"{URI} holds real articles: integration tests empty the database. Start the "
+                "throwaway one (docker compose --profile test up -d --wait neo4j-test) and set "
+                "NEO4J_URI=bolt://localhost:7688"
+            )
+        driver.execute_query("MATCH (n) DETACH DELETE n")
 
 
 @pytest.fixture
@@ -104,8 +110,7 @@ def test_articles_are_stored_with_all_properties(store: Neo4jStore) -> None:
 
 def test_all_articles_returns_complete_articles_in_id_order(store: Neo4jStore) -> None:
     store.upsert_articles([art(2), art(1)])
-    ours = [a for a in store.all_articles() if a.arxiv_id.startswith("9999.")]
-    assert ours == [art(1), art(2)]
+    assert store.all_articles() == [art(1), art(2)]
 
 
 def _stored(query: str, **params: str | int) -> list[neo4j.Record]:
@@ -195,8 +200,7 @@ def test_works_and_citations_build_expected_graph(store: Neo4jStore) -> None:
     assert delta(before, store.counts()) == (3, 2, 3, 1)
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
         records, _, _ = driver.execute_query(
-            "MATCH (s:Article)-[:CITES]->(t:Article) WHERE s.arxiv_id STARTS WITH '9999.' "
-            "RETURN s.arxiv_id AS s, t.arxiv_id AS t"
+            "MATCH (s:Article)-[:CITES]->(t:Article) RETURN s.arxiv_id AS s, t.arxiv_id AS t"
         )
         order, _, _ = driver.execute_query(
             "MATCH (:Article {arxiv_id: '9999.00002'})-[r:AUTHORED_BY]->(p) "

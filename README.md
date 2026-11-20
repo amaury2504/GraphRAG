@@ -13,6 +13,21 @@ docker compose up -d --build --wait
 uv run python -m graphrag.cli.ingest --limit 100
 ```
 
+## Tests d'intégration
+
+Ils vident la base : ils tournent sur un Neo4j jetable (`neo4j-test`, port 7688, données en
+mémoire), jamais sur la base réelle (un test refuse une base qui contient de vrais articles).
+
+```
+docker compose --profile test up -d --wait neo4j-test
+set -a; . ./.env; set +a    # NEO4J_PASSWORD, POSTGRES_DSN
+NEO4J_URI=bolt://localhost:7688 uv run pytest -m integration tests/integration/test_chunk_store.py
+docker compose --profile test down neo4j-test    # facultatif : la base repart vide à chaque redémarrage
+```
+
+En local, ne lancer que les fichiers d'intégration concernés par le changement (la suite complète
+dure environ 35 minutes) ; la CI lance le reste.
+
 ## Données et licences
 
 Ce dépôt contient uniquement du code et de petits échantillons de test fictifs ou libres.

@@ -1,14 +1,13 @@
 """Garbage collection of old versions and unreferenced chunks on the real Neo4j.
 
-The sweep is restricted to the test articles (ids 9999.*) and to the versions made by the test,
-so a run never touches real data.
+Runs on the throwaway database, so the sweep can look at everything.
 """
 
 import neo4j
 import pytest
 
 from graphrag.adapters.neo4j_store import Neo4jStore
-from tests.integration.test_chunk_store import _max_version_id, indexed, store, unit_vector
+from tests.integration.test_chunk_store import indexed, store, unit_vector
 from tests.integration.test_neo4j_store import URI, USER, _password, _stored, art
 
 pytestmark = pytest.mark.integration
@@ -18,16 +17,8 @@ __all__ = ["store"]  # the shared fixture, re-exported for pytest
 ARTICLE = "9999.00001"
 
 
-_ABOVE = [0]  # the highest version id that existed before the test
-
-
 @pytest.fixture
-def scoped(store: Neo4jStore, monkeypatch: pytest.MonkeyPatch) -> Neo4jStore:
-    _ABOVE[0] = _max_version_id()
-    monkeypatch.setattr(
-        "graphrag.adapters.neo4j_store.GC_CHUNK_SCOPE", "AND c.arxiv_id STARTS WITH '9999.'"
-    )
-    monkeypatch.setattr("graphrag.adapters.neo4j_store.GC_VERSION_SCOPE", f"AND v.id > {_ABOVE[0]}")
+def scoped(store: Neo4jStore) -> Neo4jStore:
     store.upsert_articles([art(1)])
     return store
 
@@ -45,7 +36,7 @@ def stored_keys() -> set[str]:
 
 
 def stored_versions() -> int:
-    return len(_stored("MATCH (v:Version) WHERE v.id > $above RETURN v.id", above=_ABOVE[0]))
+    return len(_stored("MATCH (v:Version) RETURN v.id"))
 
 
 def four_versions(store: Neo4jStore) -> list[str]:
