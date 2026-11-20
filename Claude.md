@@ -53,7 +53,9 @@ tests/
 # installer                  : uv sync   (Python 3.14, versions figées dans uv.lock)
 # démarrer les services      : cp .env.example .env && docker compose up -d --build --wait
 # lancer les tests           : uv run pytest                (unitaires, sans réseau)
-#                              uv run pytest -m integration (nécessite les services ; charger .env)
+#                              uv run pytest -m integration (base jetable : docker compose --profile test up -d --wait neo4j-test,
+#                              charger .env, puis NEO4J_URI=bolt://localhost:7688 ; ces tests VIDENT la base, jamais la réelle.
+#                              En local, seulement les fichiers concernés ; la CI lance le reste)
 #                              uv run pytest -m model       (vrai modèle d'embeddings, téléchargé au 1er lancement)
 # lint et types              : uv run ruff check . && uv run ruff format --check . && uv run mypy
 # gates (comme la CI)        : uv run python scripts/gates.py --skip mutation --skip gitleaks

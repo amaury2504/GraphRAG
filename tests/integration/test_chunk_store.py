@@ -1,7 +1,6 @@
 """Chunk storage and indexes on the real Neo4j.
 
-Uses only test articles (ids 9999.*), removed afterwards. The indexes themselves are the
-real ones (384 dimensions, as for bge-small), so creating them here is harmless.
+Runs on the throwaway database (see test_neo4j_store). Test articles have ids 9999.*.
 """
 
 import math
@@ -29,28 +28,15 @@ DIMENSIONS = 384
 TEST_POINTER = "test-index"
 
 
-def _max_version_id() -> int:
-    records = _stored("MATCH (v:Version) RETURN coalesce(max(v.id), 0) AS m")
-    return int(records[0]["m"])
-
-
-def _drop_test_versions(above: int) -> None:
-    with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
-        driver.execute_query("MATCH (c:Current {name: $name}) DETACH DELETE c", name=TEST_POINTER)
-        driver.execute_query("MATCH (v:Version) WHERE v.id > $above DETACH DELETE v", above=above)
-
-
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> Iterator[Neo4jStore]:
-    """The real database, but versions use their own pointer and are removed afterwards."""
+    """The throwaway database, emptied before and after; versions use their own pointer."""
     monkeypatch.setattr("graphrag.adapters.neo4j_store.CURRENT_NAME", TEST_POINTER)
     _cleanup()
     with Neo4jStore(URI, USER, _password()) as s:
         s.ensure_schema()
         s.ensure_chunk_schema(DIMENSIONS)
-        above = _max_version_id()
         yield s
-        _drop_test_versions(above)
     _cleanup()
 
 
@@ -97,8 +83,8 @@ def test_chunks_are_linked_to_their_article_and_rewrites_add_nothing(store: Neo4
     ]
 
 
-def ours(states: list[ArticleIndexState]) -> dict[str, ArticleIndexState]:
-    return {s.article.arxiv_id: s for s in states if s.article.arxiv_id.startswith("9999.")}
+def by_id(states: list[ArticleIndexState]) -> dict[str, ArticleIndexState]:
+    return {s.article.arxiv_id: s for s in states}
 
 
 def test_index_state_lists_articles_with_the_hash_they_were_indexed_from(
@@ -106,7 +92,7 @@ def test_index_state_lists_articles_with_the_hash_they_were_indexed_from(
 ) -> None:
     store.upsert_articles([art(1), art(2)])
     store.upsert_chunks([indexed(1, 0, "text", 0)], {"9999.00001": "h1"})
-    states = ours(store.articles_with_index_state())
+    states = by_id(store.articles_with_index_state())
     assert list(states) == ["9999.00001", "9999.00002"]  # ordered by id
     assert states["9999.00001"].indexed_hash == "h1"
     assert states["9999.00002"].indexed_hash is None
@@ -116,7 +102,7 @@ def test_index_state_lists_articles_with_the_hash_they_were_indexed_from(
 def test_chunks_written_without_a_hash_leave_the_article_unindexed(store: Neo4jStore) -> None:
     store.upsert_articles([art(1)])
     store.upsert_chunks([indexed(1, 0, "text", 0)])
-    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash is None
+    assert by_id(store.articles_with_index_state())["9999.00001"].indexed_hash is None
 
 
 def keys_of(article_id: str) -> list[str]:
@@ -144,7 +130,7 @@ def test_replacing_an_article_keeps_the_old_chunks_and_adds_the_new_ones(
     store.upsert_chunks([only], {"9999.00001": "h2"})
     assert len(keys_of("9999.00001")) == 4  # nothing deleted: that is the garbage collector's job
     assert owned_keys("9999.00001") == [only.key]  # but only the new chunk is owned
-    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash == "h2"
+    assert by_id(store.articles_with_index_state())["9999.00001"].indexed_hash == "h2"
 
 
 def test_a_chunk_that_already_exists_is_not_rewritten(store: Neo4jStore) -> None:
@@ -164,7 +150,7 @@ def test_an_article_emptied_by_a_replacement_owns_no_chunk(store: Neo4jStore) ->
     store.upsert_chunks([], {"9999.00001": "h2"})
     assert owned_keys("9999.00001") == []
     assert len(keys_of("9999.00001")) == 2
-    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash == "h2"
+    assert by_id(store.articles_with_index_state())["9999.00001"].indexed_hash == "h2"
 
 
 def test_replacing_one_article_leaves_the_others_alone(store: Neo4jStore) -> None:
@@ -176,7 +162,7 @@ def test_replacing_one_article_leaves_the_others_alone(store: Neo4jStore) -> Non
     )
     store.upsert_chunks([indexed(1, 0, "a", 0)], {"9999.00001": "h1b"})
     assert owned_keys("9999.00002") == sorted(c.key for c in second)
-    assert ours(store.articles_with_index_state())["9999.00002"].indexed_hash == "h2"
+    assert by_id(store.articles_with_index_state())["9999.00002"].indexed_hash == "h2"
 
 
 def test_a_failed_write_changes_nothing(store: Neo4jStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,7 +176,7 @@ def test_a_failed_write_changes_nothing(store: Neo4jStore, monkeypatch: pytest.M
         store.upsert_chunks([indexed(1, 0, "rewritten", 5)], {"9999.00001": "h2"})
     assert keys_of("9999.00001") == sorted(c.key for c in old)
     assert owned_keys("9999.00001") == sorted(c.key for c in old)
-    assert ours(store.articles_with_index_state())["9999.00001"].indexed_hash == "h1"
+    assert by_id(store.articles_with_index_state())["9999.00001"].indexed_hash == "h1"
 
 
 def test_no_rows_and_no_hashes_is_a_noop(store: Neo4jStore) -> None:
@@ -205,7 +191,7 @@ def test_vector_index_finds_the_nearest_chunk(store: Neo4jStore) -> None:
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
         records, _, _ = driver.execute_query(
             "CALL db.index.vector.queryNodes($index, 50, $vector) YIELD node, score "
-            "WHERE node.arxiv_id STARTS WITH '9999.' RETURN node.key AS key, score",
+            "RETURN node.key AS key, score",
             index=VECTOR_INDEX,
             vector=list(unit_vector(7)),
         )
@@ -216,7 +202,7 @@ def test_vector_index_finds_the_nearest_chunk(store: Neo4jStore) -> None:
 def test_vector_search_returns_hits_with_their_article(store: Neo4jStore) -> None:
     store.upsert_articles([art(1), art(2)])
     store.upsert_chunks([indexed(1, 0, "near", 7), indexed(2, 0, "far", 8)])
-    hits = [h for h in store.vector_search(unit_vector(7), 50) if h.arxiv_id.startswith("9999.")]
+    hits = store.vector_search(unit_vector(7), 50)
     first = hits[0]
     assert (first.arxiv_id, first.title, first.position, first.text) == (
         "9999.00001",
@@ -265,8 +251,7 @@ def test_fulltext_index_searches_title_and_chunk(store: Neo4jStore) -> None:
             index=FULLTEXT_INDEX,
         )
         by_title, _, _ = driver.execute_query(
-            "CALL db.index.fulltext.queryNodes($index, 'T1') YIELD node "
-            "WHERE node.arxiv_id STARTS WITH '9999.' RETURN node.key AS key",
+            "CALL db.index.fulltext.queryNodes($index, 'T1') YIELD node RETURN node.key AS key",
             index=FULLTEXT_INDEX,
         )
     key = indexed(1, 0, "zqxwv benchmark results", 0).key
@@ -361,13 +346,12 @@ def test_checking_without_a_recorded_fingerprint_fails(clean_info: Neo4jStore) -
 def readable(store: Neo4jStore, hot: int) -> list[str]:
     """Texts of our test chunks that a vector search can reach, along axis `hot`."""
     hits = store.vector_search(unit_vector(hot), 50)
-    return [h.text for h in hits if h.arxiv_id.startswith("9999.")]
+    return [h.text for h in hits]
 
 
 def manifest(version_id: int) -> list[str]:
     records = _stored(
-        "MATCH (:Version {id: $id})-[:CONTAINS]->(c:Chunk) "
-        "WHERE c.arxiv_id STARTS WITH '9999.' RETURN c.key AS key ORDER BY key",
+        "MATCH (:Version {id: $id})-[:CONTAINS]->(c:Chunk) RETURN c.key AS key ORDER BY key",
         id=version_id,
     )
     return [r["key"] for r in records]
@@ -669,7 +653,7 @@ def test_searches_still_return_the_requested_number_of_current_chunks(store: Neo
     store.publish_version()
     store.upsert_chunks([indexed(1, 0, "current", 2)], {"9999.00001": "hz"})
     store.publish_version()
-    hits = [h for h in store.vector_search(unit_vector(2), 1) if h.arxiv_id.startswith("9999.")]
+    hits = store.vector_search(unit_vector(2), 1)
     assert [h.text for h in hits] == ["current"]
 
 

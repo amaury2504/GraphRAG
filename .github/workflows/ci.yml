@@ -33,11 +33,12 @@ jobs:
       - name: Start the full stack
         run: |
           cp .env.example .env
-          docker compose up -d --build --wait
+          docker compose --profile test up -d --build --wait
       - name: Integration tests
+        # Against the throwaway Neo4j (neo4j-test, port 7688), like in local.
         run: |
           set -a; . ./.env; set +a
-          uv run pytest -m integration
+          NEO4J_URI=bolt://localhost:7688 uv run pytest -m integration
       - name: API health through the container
         run: curl --fail --silent --show-error http://localhost:8000/health
       - name: Logs on failure

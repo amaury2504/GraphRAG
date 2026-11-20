@@ -1,6 +1,6 @@
 """Embedding model versioning on the real Neo4j: a second model is built next to the first.
 
-Uses only test articles (ids 9999.*) and the test version pointer. The second and third models
+Runs on the throwaway database (see test_neo4j_store). The second and third models
 are fake (8 and 6 dimensions) so their derived vector indexes are dropped afterwards; the real
 legacy index (`chunk_embedding`) is never garbage collected here.
 """
@@ -15,7 +15,6 @@ from graphrag.domain.models import Chunk, IndexedChunk, IndexInfo
 from graphrag.domain.versioning import VersionNotReadyError
 from tests.integration.test_chunk_store import (
     DIMENSIONS,
-    _max_version_id,
     indexed,
     store,
     unit_vector,
@@ -48,22 +47,14 @@ def vector_indexes() -> set[str]:
 
 
 @pytest.fixture
-def models(store: Neo4jStore, monkeypatch: pytest.MonkeyPatch) -> Iterator[Neo4jStore]:
-    # versions, re-embedding and rollbacks only look at the test articles, never at real ones
-    monkeypatch.setattr(
-        "graphrag.adapters.neo4j_store.ARTICLE_SCOPE", "AND a.arxiv_id STARTS WITH '9999.'"
-    )
-    # A database with no recorded model (an empty one, as in CI) gets a legacy model for the
-    # test, removed afterwards: the first model recorded owns the legacy slot.
-    recorded_here = store.read_index_info() is None
-    if recorded_here:
-        store.ensure_index_info(IndexInfo("test-legacy-model", "rev0", DIMENSIONS, "title. chunk"))
+def models(store: Neo4jStore) -> Iterator[Neo4jStore]:
+    # The empty database has no recorded model: give it a legacy one (the first model recorded
+    # owns the legacy slot). The cleanup of the `store` fixture removes it.
+    store.ensure_index_info(IndexInfo("test-legacy-model", "rev0", DIMENSIONS, "title. chunk"))
     yield store
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
         for info in (B, C):
             driver.execute_query(f"DROP INDEX {info.slot().index} IF EXISTS")
-        if recorded_here:
-            driver.execute_query("MATCH (i:IndexInfo {name: 'chunks'}) DELETE i")
 
 
 def published_with_legacy(store: Neo4jStore) -> None:
@@ -199,28 +190,18 @@ def publish_three(store: Neo4jStore) -> None:
     store.publish_version(C)
 
 
-@pytest.fixture
-def scoped(models: Neo4jStore, monkeypatch: pytest.MonkeyPatch) -> Neo4jStore:
-    above = _max_version_id()
-    monkeypatch.setattr(
-        "graphrag.adapters.neo4j_store.GC_CHUNK_SCOPE", "AND c.arxiv_id STARTS WITH '9999.'"
-    )
-    monkeypatch.setattr("graphrag.adapters.neo4j_store.GC_VERSION_SCOPE", f"AND v.id > {above}")
-    return models
-
-
-def test_a_dry_run_names_the_vector_index_nobody_needs_any_more(scoped: Neo4jStore) -> None:
-    publish_three(scoped)
-    report = scoped.collect_garbage(keep=2, min_age_days=0, apply=False)
+def test_a_dry_run_names_the_vector_index_nobody_needs_any_more(models: Neo4jStore) -> None:
+    publish_three(models)
+    report = models.collect_garbage(keep=2, min_age_days=0, apply=False)
     assert report.dropped_vector_indexes == (B.slot().index,)
     assert B.slot().index in vector_indexes()
 
 
 def test_applying_drops_the_unused_index_and_its_vectors_but_keeps_the_used_one(
-    scoped: Neo4jStore,
+    models: Neo4jStore,
 ) -> None:
-    publish_three(scoped)
-    report = scoped.collect_garbage(keep=2, min_age_days=0, apply=True)
+    publish_three(models)
+    report = models.collect_garbage(keep=2, min_age_days=0, apply=True)
     assert report.dropped_vector_indexes == (B.slot().index,)
     assert B.slot().index not in vector_indexes()
     assert C.slot().index in vector_indexes()
@@ -231,12 +212,12 @@ def test_applying_drops_the_unused_index_and_its_vectors_but_keeps_the_used_one(
     assert [(r["b"], r["c"]) for r in rows] == [(None, 6)]
 
 
-def test_an_index_no_version_has_used_yet_is_left_alone(scoped: Neo4jStore) -> None:
-    publish_three(scoped)
+def test_an_index_no_version_has_used_yet_is_left_alone(models: Neo4jStore) -> None:
+    publish_three(models)
     other = IndexInfo("test-model-b", "rev9", 8, "title. chunk")
-    scoped.ensure_chunk_schema(8, other)  # a re-embedding in progress: no version uses it
+    models.ensure_chunk_schema(8, other)  # a re-embedding in progress: no version uses it
     try:
-        report = scoped.collect_garbage(keep=2, min_age_days=0, apply=True)
+        report = models.collect_garbage(keep=2, min_age_days=0, apply=True)
         assert other.slot().index not in report.dropped_vector_indexes
         assert other.slot().index in vector_indexes()
     finally:
