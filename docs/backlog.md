@@ -6,6 +6,7 @@
 
 | Tâche | Contenu | Dépend de | État |
 | --- | --- | --- | --- |
+| T8 | **Prioritaire (prochaine tâche).** Base Neo4j jetable pour les tests d'intégration : second conteneur vide (service `neo4j-test` de `compose.yaml`, autre port, volume éphémère) visé par `NEO4J_URI` pour les tests, avec une commande documentée dans `Claude.md` ; la suite passe de ~35 min sur la vraie base à ~20 s, et les données réelles ne sont plus exposées (retirer ensuite les périmètres `9999.*` et le pointeur de version de test devenus inutiles, si possible). Routine associée : en local, ne lancer que les fichiers d'intégration concernés par la tâche, la suite complète étant laissée à la CI | aucune | libre |
 | T7 | Balayage de la taille de chunk et de l'overlap sur `eval/` (recall@k, MRR) ; relancer l'évaluation après chaque changement de chunker ou de modèle | T1 | libre |
 
 ## Fait

@@ -68,6 +68,15 @@
       "etat": "a-faire",
       "branche": "agent/t7",
       "worktree": "../GraphRAG-wt/t7"
+    },
+    "t8": {
+      "titre": "T8 Base Neo4j jetable pour les tests d'intégration",
+      "contenu": "Service neo4j-test vide dans compose.yaml (autre port, volume éphémère) visé par NEO4J_URI pour les tests ; commande documentée ; retirer les périmètres 9999.* devenus inutiles ; routine : en local, seulement les fichiers d'intégration concernés",
+      "type": "code",
+      "source": "docs/backlog.md",
+      "etat": "a-faire",
+      "branche": "agent/t8",
+      "worktree": "../GraphRAG-wt/t8"
     }
   },
   "vagues": [
@@ -90,6 +99,11 @@
       "vague": 4,
       "taches": ["t5"],
       "pourquoi": "T5 a besoin des statuts de T3 pour basculer l'index"
+    },
+    {
+      "vague": 5,
+      "taches": ["t8"],
+      "pourquoi": "Prioritaire, décidée par l'auteur : accélère les tests d'intégration de toutes les tâches suivantes (T7 reste libre, elle ne touche pas aux tests Neo4j)"
     }
   ],
   "dependances_precises": {
@@ -99,7 +113,8 @@
     "t4": ["t2"],
     "t5": ["t2", "t3"],
     "t6": ["t1"],
-    "t7": ["t1"]
+    "t7": ["t1"],
+    "t8": []
   },
   "exclues": []
 }

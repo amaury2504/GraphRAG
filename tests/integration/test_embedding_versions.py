@@ -53,10 +53,17 @@ def models(store: Neo4jStore, monkeypatch: pytest.MonkeyPatch) -> Iterator[Neo4j
     monkeypatch.setattr(
         "graphrag.adapters.neo4j_store.ARTICLE_SCOPE", "AND a.arxiv_id STARTS WITH '9999.'"
     )
+    # A database with no recorded model (an empty one, as in CI) gets a legacy model for the
+    # test, removed afterwards: the first model recorded owns the legacy slot.
+    recorded_here = store.read_index_info() is None
+    if recorded_here:
+        store.ensure_index_info(IndexInfo("test-legacy-model", "rev0", DIMENSIONS, "title. chunk"))
     yield store
     with neo4j.GraphDatabase.driver(URI, auth=(USER, _password())) as driver:
         for info in (B, C):
             driver.execute_query(f"DROP INDEX {info.slot().index} IF EXISTS")
+        if recorded_here:
+            driver.execute_query("MATCH (i:IndexInfo {name: 'chunks'}) DELETE i")
 
 
 def published_with_legacy(store: Neo4jStore) -> None:
