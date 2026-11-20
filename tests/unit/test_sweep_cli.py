@@ -94,6 +94,7 @@ def test_main_refuses_to_index_the_real_database(
     )
     monkeypatch.setenv("NEO4J_URI", "bolt://localhost:7687")
     monkeypatch.setenv("NEO4J_PASSWORD", "x")
+    monkeypatch.setenv("POSTGRES_DSN", "postgresql://u:p@db/x")
     code = cli.main(["--questions", str(questions), "--target-uri", "bolt://localhost:7687"])
     assert code == 2
     assert "throwaway" in capsys.readouterr().out
